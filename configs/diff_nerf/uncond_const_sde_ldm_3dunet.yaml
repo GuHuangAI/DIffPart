@@ -1,0 +1,131 @@
+model:
+  model_type: const_sde
+  ldm: True
+  model_name: 3dunet
+  image_size: [ 64, 64, 64 ]
+  ckpt_path:
+  ignore_keys: [ ]
+  only_model: False
+  timesteps: 1000
+  train_sample: -1
+  sampling_timesteps: 20
+  loss_type: l2
+  use_l1: True
+  objective: pred_KC
+  start_dist: normal
+  perceptual_weight: 0
+  scale_factor: 0.4254
+  scale_by_std: True
+#  scale_factor: 0.2795
+  default_scale: True
+  scale_by_softsign: False
+  eps: !!float 1e-4
+  weighting_loss: True
+  first_stage:
+    type: ae3d_4
+    embed_dim: 5
+    std_scale: 3.28
+    use_render_loss: True
+    use_cls_loss: True
+    cls_start: 50000
+    cls_path: "/media/huang/T7/data/diff_nerf/classifier/best_model_res18_rotate_non_normalize"
+    render_start: 50000
+    maxm: 191.3546
+    minm: -258.9259
+    lossconfig:
+      disc_start: 50001
+      kl_weight: 0.000001
+      disc_weight: 0.5
+      perceptual_weight: 0
+      disc_in_channels: 5
+      disc_num_layers: 3
+    ddconfig:
+      double_z: True
+      z_channels: 10
+      resolution: [ 64, 64, 64 ]
+      in_channels: 5
+      out_ch: 5
+      ch: 64
+      groups: 1
+      ch_mult: [ 1, 2, 4 ]  # num_down = len(ch_mult)-1
+      num_res_blocks: 1
+      attn_resolutions: [ ]
+      dropout: 0.0
+    render_kwargs:
+      hwf: [ 800, 800, 1111.1113654242622 ]  # default hwf
+      near: 2
+      far: 4
+      ndc: False
+      render_factor: 0
+      inverse_y: False
+      flip_x: False
+      flip_y: False
+      stepsize: 0.25
+      bg: 0
+      render_depth: True
+      rotate_flag: False
+      N_rand: 8192
+      inner_iter: 2
+      weight_main: 5. # 1 default
+      weight_entropy_last: 0.005 # 0.001 default
+      weight_rgbper: 0.05 # 0.01 default
+      weight_tv: 0.05
+      weight_cls: 1
+      dvgo:
+        xyz_min: [ -1, -1, -1 ]  # default
+        xyz_max: [ 1, 1, 1 ]
+        num_voxels: 262144
+        num_voxels_base: 262144
+        alpha_init: 0.01
+        fast_color_thres: 0.0001
+        mask_cache_thres: 0.001
+        rgbnet_dim: 4
+        viewbase_pe: 4
+        rgbnet_direct: True
+        rgbnet_full_implicit: False
+        rgbnet_depth: 4
+        rgbnet_width: 256
+    ckpt_path: '/media/huang/T7/data/diff_nerf/result_ae_kl_64x64x64_d4_mlp4_no_cls/model-60.pt'
+    # ckpt_path: '/media/huang/ZX3 512G/data/diff_nerf/result_ae_kl_128x128x128_d4/model-20.pt'
+  unet:
+    dim: 64
+    dim_mults: [1, 2, 2]
+    in_channels: 5
+    resnet_block_groups: 8
+    heads: 4
+    learned_sinusoidal_dim: 16
+    window_size_q: [[2, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2]]
+    window_size_k: [[[2, 2, 2], [1, 1, 1]],
+                    [[2, 2, 2], [1, 1, 1]],
+                    [[2, 2, 2], [1, 1, 1]],
+                    [[2, 2, 2], [1, 1, 1]]]
+    out_mul: 1
+
+data:
+  tar_path: '/media/huang/T7/data/diff_nerf/DVGO_results_64x64x64'
+  image_path: '/media/huang/T7/data/diff_nerf/ShapeNet_Render'
+  load_rgb_net: False
+  load_mask_cache: False
+  use_rotate_ransform: False
+  batch_size: 1
+  load_render_kwargs: True
+  sample_num: 10
+  normalize: False
+  maxm: 191.3546
+  minm: -258.9259
+
+trainer:
+  gradient_accumulate_every: 2  # not true gradient_accumulate_every, but used for optimize g and d alternately
+  lr: !!float 5e-5
+  min_lr: !!float 1e-5
+  train_wd: !!float 1e-4
+  train_num_steps: 300000
+  save_and_sample_every: 10000
+  log_freq: 100
+  results_folder: '/media/huang/T7/data/diff_nerf/results_uncond_const_sde_ldm_3dunet'
+  amp: False
+  fp16: False
+  test_before: True
+  resume_milestone: current
+  ema_update_after_step: 10000
+  ema_update_every: 4

@@ -1,0 +1,66 @@
+model:
+  embed_dim: 4
+  lossconfig:
+    disc_start: 50001
+    kl_weight: 0.000001
+    disc_weight: 0.5
+    perceptual_weight: 0
+    disc_in_channels: 4
+    disc_num_layers: 2
+  ddconfig:
+    double_z: True
+    z_channels: 4
+#    resolution: [128, 128, 128]
+    resolution: [64, 64, 64]
+    in_channels: 4
+    out_ch: 4
+    ch: 32
+    groups: 8
+    ch_mult: [ 1,2,2,2]  # num_down = len(ch_mult)-1
+    num_res_blocks: 1
+    attn_resolutions: [ ]
+    dropout: 0.0
+  render_kwargs:
+    hwf: [800, 800, 1111.1113654242622]  # default hwf
+    near: 2
+    far: 4
+    ndc: False
+    render_factor: 0
+    inverse_y: False
+    flip_x: False
+    flip_y: False
+    stepsize: 0.25
+    bg: 1
+    render_depth: True
+    dvgo:
+      xyz_min: [-1, -1, -1]  # default
+      xyz_max: [1, 1, 1]
+      num_voxels: 262144
+      num_voxels_base: 262144
+      alpha_init: 0.01
+      fast_color_thres: 0.0001
+      rgbnet_dim: 3
+      rgbnet_direct: True
+      rgbnet_full_implicit: False
+      rgbnet_depth: 3
+      rgbnet_width: 128
+  ckpt_path:
+  # ckpt_path: '/media/huang/ZX3 512G/data/diff_nerf/result_ae_kl_128x128x128_d4/model-20.pt'
+
+data:
+  tar_path: '/media/huang/ZX3 512G/data/DVGO_results'
+  image_path: '/media/huang/ZX3 512G/data/ShapeNet_Render'
+  load_rgb_net: True
+  load_mask_cache: True
+#  augment_horizontal_flip: True
+  batch_size: 2
+
+trainer:
+  gradient_accumulate_every: 2
+  lr: !!float 5e-5
+  train_num_steps: 200000
+  save_and_sample_every: 10000
+  log_freq: 100
+  results_folder: '/media/huang/ZX3 512G/data/diff_nerf/result_ae_kl_128x128x128_d4'
+  amp: False
+  fp16: False
