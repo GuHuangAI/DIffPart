@@ -6,7 +6,7 @@ model:
   use_cls_loss: False
   cls_start: 10000
   cls_path: "/media/huang/T7/data/diff_nerf/classifier/best_model_res18_rotate_non_normalize"
-  render_start: 80000
+  render_start: 70000
   grid_size: [64, 32, 16]
   maxm: 191.3546
   minm: -258.9259
@@ -89,7 +89,7 @@ trainer:
   lr: !!float 5e-5
   min_lr: !!float 1e-5
   skip_opt_net: True
-  train_num_steps: 200000
+  train_num_steps: 150000
   save_and_sample_every: 10000
   log_freq: 100
   results_folder: '/data/huang/diff_nerf/result_ae_kl_64x64x64_ae3d10_bed'
