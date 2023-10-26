@@ -69,7 +69,7 @@ model:
 data:
   class_name: diff_nerf.data.VolumeDataset
   data_type: 'blender'
-  cls_name: ['02818832']
+  cls_names: ['02818832']
   tar_path: '/data/huang/diff_nerf/DVGO_results_64x64x64'
   image_path: '/data/huang/diff_nerf/ShapeNet_Render'
   load_rgb_net: False

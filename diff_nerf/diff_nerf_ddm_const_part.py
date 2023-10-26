@@ -4,6 +4,7 @@ import math
 import torch.nn.functional as F
 import os
 from diff_nerf.utils import default, identity, normalize_to_neg_one_to_one, unnormalize_to_zero_to_one
+from diff_nerf.submodules import IndexMLP
 from tqdm.auto import tqdm
 from einops import rearrange, reduce
 from functools import partial
@@ -13,7 +14,6 @@ from torch.cuda.amp import custom_bwd, custom_fwd
 import numpy as np
 from torch_scatter import segment_coo
 from diff_nerf import dvgo, grid
-# from scipy import ndimage
 from torch.utils.cpp_extension import load
 parent_dir = os.path.dirname(os.path.abspath(__file__))
 render_utils_cuda = load(
@@ -104,8 +104,8 @@ class DDPM(nn.Module):
         # self.perceptual_weight = perceptual_weight
         # if self.perceptual_weight > 0:
         #     self.perceptual_loss = LPIPS().eval()
-        '''
-        # model kwargs #
+
+        # dvgo kwargs #
         self.register_buffer('xyz_min', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_min))
         self.register_buffer('xyz_max', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_max))
         self.fast_color_thres = self.cfg.render_kwargs.dvgo.fast_color_thres
@@ -124,27 +124,47 @@ class DDPM(nn.Module):
         self.world_size = ((self.xyz_max - self.xyz_min) / self.voxel_size).long()
         self.voxel_size_ratio = self.voxel_size / self.voxel_size_base
 
+        # if colorize_nlabels is not None:
+        #     assert type(colorize_nlabels)==int
+        #     self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
+
         viewbase_pe = self.cfg.render_kwargs.dvgo.viewbase_pe
         self.register_buffer('viewfreq', torch.FloatTensor([(2 ** i) for i in range(viewbase_pe)]))
-        # dim0 = (3 + 3 * viewbase_pe * 2)
-        # if self.cfg.render_kwargs.dvgo.rgbnet_full_implicit:
-        #     pass
-        # elif self.cfg.render_kwargs.dvgo.rgbnet_direct:
-        #     dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim
-        # else:
-        #     dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim - 3
-        # rgbnet_width = cfg.render_kwargs.dvgo.rgbnet_width
-        # rgbnet_depth = cfg.render_kwargs.dvgo.rgbnet_depth
-        # self.rgbnet = nn.Sequential(
-        #     nn.Linear(dim0, rgbnet_width), nn.ReLU(inplace=True),
-        #     *[
-        #         nn.Sequential(nn.Linear(rgbnet_width, rgbnet_width), nn.ReLU(inplace=True))
-        #         for _ in range(rgbnet_depth - 2)
-        #     ],
-        #     nn.Linear(rgbnet_width, 3),
-        # )
-        # nn.init.constant_(self.rgbnet[-1].bias, 0)
-        '''
+        self.use_barf_pe = self.cfg.render_kwargs.dvgo.get('use_barf_pe', False)
+        # self.residual = MultiScaleAttentionGrid(embed_dim - 1, grid_size=cfg.grid_size)
+        dim0 = (3 + 3 * viewbase_pe * 2)
+        if self.cfg.render_kwargs.dvgo.rgbnet_full_implicit:
+            pass
+        elif self.cfg.render_kwargs.dvgo.rgbnet_direct:
+            dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim #* (1 + len(self.residual.grid_size))
+        else:
+            dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim - 3
+        rgbnet_width = cfg.render_kwargs.dvgo.rgbnet_width
+        rgbnet_depth = cfg.render_kwargs.dvgo.rgbnet_depth
+
+        # part render mlps
+        self.rgbnets = nn.ModuleList()
+        for _ in self.num_parts:
+            rgbnet = nn.Sequential(
+                nn.Linear(dim0, rgbnet_width), nn.ReLU(inplace=True),
+                *[
+                    nn.Sequential(nn.Linear(rgbnet_width, rgbnet_width), nn.ReLU(inplace=True))
+                    for _ in range(rgbnet_depth - 2)
+                ],
+                nn.Linear(rgbnet_width, 3),
+            )
+            nn.init.constant_(rgbnet[-1].bias, 0)
+            self.rgbnets.append(rgbnet)
+
+        # part kwargs
+        self.num_parts = self.cfg.get('num_parts', 8)
+        self.part_fea_dim = self.cfg.get('part_fea_dim', 128)
+        self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
+        nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
+        dim_index = 3 + 3 * viewbase_pe * 2
+        self.index_mlp = IndexMLP(dim_index, self.num_part, part_dim=self.part_fea_dim)
+
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys, only_model)
 
@@ -185,11 +205,6 @@ class DDPM(nn.Module):
 
     def training_step(self, batch):
         z, *_ = self.get_input(batch)
-        # if self.scale_by_softsign:
-        #     z = F.softsign(z)
-        # elif self.scale_by_std:
-        #     z = self.scale_factor * z
-        # # print('grad', self.scale_bias.grad)
         loss, loss_dict = self(z)
         return loss, loss_dict
 
@@ -198,17 +213,6 @@ class DDPM(nn.Module):
         eps = self.eps  # smallest time step
         t = torch.rand(x.shape[0], device=x.device) * (1. - eps) + eps
         return self.p_losses(x, t, *args, **kwargs)
-
-    def q_sample2(self, x_start, t, noise=None):
-        b, c, h, w = x_start.shape
-        noise = default(noise, lambda: torch.randn_like(x_start))
-        _, nt = t.shape
-        param_x = self.sqrt_alphas_cumprod.repeat(b, 1).gather(-1, t)  # (b, nt)
-        x = x_start.expand(nt, b, c, h, w).transpose(1, 0) * param_x.reshape(b, nt, 1, 1, 1).repeat(1, 1, c, h, w)
-        param_noise = self.sqrt_one_minus_alphas_cumprod.repeat(b, 1).gather(-1, t)
-        n = noise.expand(nt, b, c, h, w).transpose(1, 0) * param_noise.reshape(b, nt, 1, 1, 1).repeat(1, 1, c, h, w)
-        return x + n  # (b, nt, c, h, w)
-
 
     def q_sample(self, x_start, noise, t, C):
         time = t.reshape(C.shape[0], *((1,) * (len(C.shape) - 1)))
@@ -241,43 +245,22 @@ class DDPM(nn.Module):
             noise = 2 * torch.rand_like(x_start) - 1.
         else:
             raise NotImplementedError(f'{self.start_dist} is not supported !')
-        # K = -1. * torch.ones_like(x_start)
-        # C = noise - x_start  # t = 1000 / 1000
         C = -1 * x_start             # U(t) = Ct, U(1) = - x0
         x_noisy = self.q_sample(x_start=x_start, noise=noise, t=t, C=C)  # (b, c, h, w)
         pred = self.model(x_noisy, t, **kwargs)
         C_pred, noise_pred = pred.chunk(2, dim=1)
-        # C_pred = C_pred / torch.sqrt(t)
-        # noise_pred = noise_pred / torch.sqrt(1 - t)
         x_rec = self.pred_x0_from_xt(x_noisy, noise_pred, C_pred, t)
         loss_dict = {}
         prefix = 'train'
+        target1 = C
+        target2 = noise
+        target3 = x_start
 
-        if self.objective == 'pred_noise':
-            target = noise
-        elif self.objective == 'pred_x0':
-            target = x_start
-        elif self.objective == 'pred_delta':
-            if t.shape[-1] == self.num_timesteps:
-                target = x_start - x_noisy[:, -1]
-            else:
-                target = self.q_sample(x_start=x_start, t=t[:, -1] - 1, noise=noise) - x_noisy[:, -1]
-        elif self.objective == 'pred_KC':
-            target1 = C
-            target2 = noise
-            target3 = x_start
-        elif self.objective == 'pred_v':
-            target = C
-        else:
-            raise NotImplementedError()
         loss_simple = 0.
         loss_vlb = 0.
         if self.weighting_loss:
-            simple_weight1 = 2 * torch.exp(1 - t)
-            simple_weight2 = torch.exp(torch.sqrt(t))
-            if self.cfg.model_name == 'ncsnpp9':
-                simple_weight1 = (t + 1) / t.sqrt()
-                simple_weight2 = (2 - t).sqrt() / (1 - t + self.eps).sqrt()
+            simple_weight1 = 1 / t.sqrt()
+            simple_weight2 = 1 / (1 - t + self.eps).sqrt()
         else:
             simple_weight1 = 1
             simple_weight2 = 1
@@ -306,23 +289,17 @@ class DDPM(nn.Module):
     def render_loss(self, field, render_kwargs):
         # field =
         # assert len(render_kwargs) == len(field);
-        HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess = [
+        HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss = [
             render_kwargs[k] for k in [
-                'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'images'
+                'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'images', 'masks'
             ]
         ]
         loss = 0.
         densities = field[:, 0]
         features = field[:, 1:]
-        features = features + self.residual(features)
-        for dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images in \
-                zip(densities, features, HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess):
-            # for fie, render_kwarg in zip(field, render_kwargs):
-            # HW, Ks, near, far, i_train, i_val, i_test, poses, images = [
-            #     render_kwarg[k] for k in [
-            #         'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'images'
-            #     ]
-            # ]
+        # features = features + self.residual(features)
+        for dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images, masks in \
+                zip(densities, features, HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss):
             device = dens.device
             rgb_tr_ori = images.to(device)
             render_kwarg_train = {
@@ -335,16 +312,23 @@ class DDPM(nn.Module):
                 'flip_x': self.cfg.render_kwargs.flip_x,
                 'flip_y': self.cfg.render_kwargs.flip_y,
             }
-
-            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.get_training_rays_in_maskcache_sampling(
-                rgb_tr_ori=rgb_tr_ori,
-                train_poses=poses,
-                HW=HW, Ks=Ks,
-                ndc=False, inverse_y=False,
-                flip_x=False, flip_y=False,
-                density=dens,
-                render_kwargs=render_kwarg_train)
-            # render_kwarg.update()
+            if self.cfg.render_kwargs.get('in_maskcache_sampling', True):
+                rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.get_training_rays_in_maskcache_sampling(
+                    rgb_tr_ori=rgb_tr_ori,
+                    train_poses=poses,
+                    HW=HW, Ks=Ks,
+                    ndc=False, inverse_y=False,
+                    flip_x=False, flip_y=False,
+                    density=dens,
+                    render_kwargs=render_kwarg_train)
+            else:
+                rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.first_stage_model.get_training_rays_flatten(
+                    rgb_tr_ori=rgb_tr_ori,
+                    train_poses=poses,
+                    HW=HW, Ks=Ks,
+                    ndc=False, inverse_y=render_kwarg_train['inverse_y'],
+                    flip_x=render_kwarg_train['flip_x'], flip_y=render_kwarg_train['flip_y'],
+                )
             sel_b = torch.randint(rgb_tr.shape[0], [self.cfg.render_kwargs.N_rand])
             # sel_r = torch.randint(rgb_tr.shape[1], [self.cfg.render_kwargs.N_rand])
             # sel_c = torch.randint(rgb_tr.shape[2], [self.cfg.render_kwargs.N_rand])
@@ -367,6 +351,48 @@ class DDPM(nn.Module):
             loss += loss_main + loss_entropy_last + loss_rgbper
             torch.cuda.empty_cache()
         return loss
+
+    @torch.no_grad()
+    def get_training_rays_in_maskcache_sampling(self, rgb_tr_ori, train_poses, HW, Ks, ndc, inverse_y, flip_x, flip_y,
+                                                density,
+                                                render_kwargs):
+        # print('get_training_rays_in_maskcache_sampling: start')
+        assert len(rgb_tr_ori) == len(train_poses) and len(rgb_tr_ori) == len(Ks) and len(rgb_tr_ori) == len(HW)
+        CHUNK = 64
+        DEVICE = rgb_tr_ori[0].device
+        # eps_time = time.time()
+        N = sum(im.shape[0] * im.shape[1] for im in rgb_tr_ori)
+        rgb_tr = torch.zeros([N, 3], device=DEVICE)
+        rays_o_tr = torch.zeros_like(rgb_tr)
+        rays_d_tr = torch.zeros_like(rgb_tr)
+        viewdirs_tr = torch.zeros_like(rgb_tr)
+        imsz = []
+        top = 0
+        for c2w, img, (H, W), K in zip(train_poses, rgb_tr_ori, HW, Ks):
+            assert img.shape[:2] == (H, W)
+            rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
+                H=H, W=W, K=K, c2w=c2w, ndc=ndc,
+                inverse_y=inverse_y, flip_x=flip_x, flip_y=flip_y)
+            mask = torch.empty(img.shape[:2], device=DEVICE, dtype=torch.bool)
+            for i in range(0, img.shape[0], CHUNK):
+                mask[i:i + CHUNK] = self.hit_coarse_geo(
+                    rays_o=rays_o[i:i + CHUNK], rays_d=rays_d[i:i + CHUNK], density=density, **render_kwargs).to(DEVICE)
+            n = mask.sum()
+            rgb_tr[top:top + n].copy_(img[mask])
+            rays_o_tr[top:top + n].copy_(rays_o[mask].to(DEVICE))
+            rays_d_tr[top:top + n].copy_(rays_d[mask].to(DEVICE))
+            viewdirs_tr[top:top + n].copy_(viewdirs[mask].to(DEVICE))
+            imsz.append(n)
+            top += n
+
+        # print('get_training_rays_in_maskcache_sampling: ratio', top / N)
+        rgb_tr = rgb_tr[:top]
+        rays_o_tr = rays_o_tr[:top]
+        rays_d_tr = rays_d_tr[:top]
+        viewdirs_tr = viewdirs_tr[:top]
+        # eps_time = time.time() - eps_time
+        # print('get_training_rays_in_maskcache_sampling: finish (eps time:', eps_time, 'sec)')
+        return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz
 
     @torch.no_grad()
     def get_training_rays_in_maskcache_sampling(self, rgb_tr_ori, train_poses, HW, Ks, ndc, inverse_y, flip_x, flip_y,
@@ -523,7 +549,14 @@ class DDPM(nn.Module):
         #     pass
         # else:
         #     k0 = self.k0(ray_pts)
+        batch = ray_pts.shape[0]
         k0 = self.forward_grid(fea, ray_pts)
+        rays_xyz = (ray_pts - self.xyz_min) / (self.xyz_max - self.xyz_min)
+        xyz_emb = (rays_xyz.unsqueeze(-1) * self.posfreq).flatten(-2)
+        xyz_emb = torch.cat([rays_xyz, xyz_emb.sin(), xyz_emb.cos()], -1)
+        part_fea = self.part_mlp(self.part_embeddings.weight).expand(batch, -1, -1)
+        mask_feat = self.index_mlp()
+        mask_feat = torch.cat([], dim=-1)
 
         if self.rgbnet is None:
             # no view-depend effect
@@ -869,8 +902,6 @@ class LatentDiffusion(DDPM):
         return loss, loss_dict
 
     def render_loss(self, field, render_kwargs, **kwargs):
-        # field =
-        # assert len(render_kwargs) == len(field);
         HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess = [
             render_kwargs[k] for k in [
                 'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'images'

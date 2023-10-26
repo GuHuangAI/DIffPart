@@ -410,6 +410,37 @@ class DDPM(nn.Module):
         # print('get_training_rays_in_maskcache_sampling: finish (eps time:', eps_time, 'sec)')
         return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz
 
+    @torch.no_grad()
+    def get_training_rays_flatten(self, rgb_tr_ori, train_poses, HW, Ks, ndc, inverse_y, flip_x, flip_y):
+        # print('get_training_rays_flatten: start')
+        assert len(rgb_tr_ori) == len(train_poses) and len(rgb_tr_ori) == len(Ks) and len(rgb_tr_ori) == len(HW)
+        # eps_time = time.time()
+        DEVICE = rgb_tr_ori[0].device
+        N = sum(im.shape[0] * im.shape[1] for im in rgb_tr_ori)
+        rgb_tr = torch.zeros([N, 3], device=DEVICE)
+        rays_o_tr = torch.zeros_like(rgb_tr)
+        rays_d_tr = torch.zeros_like(rgb_tr)
+        viewdirs_tr = torch.zeros_like(rgb_tr)
+        imsz = []
+        top = 0
+        for c2w, img, (H, W), K in zip(train_poses, rgb_tr_ori, HW, Ks):
+            assert img.shape[:2] == (H, W)
+            rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
+                H=H, W=W, K=K, c2w=c2w, ndc=ndc,
+                inverse_y=inverse_y, flip_x=flip_x, flip_y=flip_y)
+            n = H * W
+            rgb_tr[top:top + n].copy_(img.flatten(0, 1))
+            rays_o_tr[top:top + n].copy_(rays_o.flatten(0, 1).to(DEVICE))
+            rays_d_tr[top:top + n].copy_(rays_d.flatten(0, 1).to(DEVICE))
+            viewdirs_tr[top:top + n].copy_(viewdirs.flatten(0, 1).to(DEVICE))
+            imsz.append(n)
+            top += n
+
+        assert top == N
+        # eps_time = time.time() - eps_time
+        # print('get_training_rays_flatten: finish (eps time:', eps_time, 'sec)')
+        return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz
+
     def hit_coarse_geo(self, rays_o, rays_d, density, near, stepsize, **render_kwargs):
         far = 1e9  # the given far can be too small while rays stop when hitting scene bbox
         shape = rays_o.shape[:-1]
@@ -552,6 +583,11 @@ class DDPM(nn.Module):
             out=torch.zeros([N, 3], device=weights.device),
             reduce='sum')
         rgb_marched += (alphainv_last.unsqueeze(-1) * render_kwargs['bg'])
+        mask_marched = segment_coo(
+                    src=(weights),
+                    index=ray_id,
+                    out=torch.zeros([N], device=weights.device),
+                    reduce='sum')
         ret_dict.update({
             'alphainv_last': alphainv_last,
             'weights': weights,
@@ -559,6 +595,7 @@ class DDPM(nn.Module):
             'raw_alpha': alpha,
             'raw_rgb': rgb,
             'ray_id': ray_id,
+            'mask_marched': mask_marched,
         })
 
         if render_kwargs.get('render_depth', False):
