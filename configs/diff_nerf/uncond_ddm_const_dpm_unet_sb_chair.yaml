@@ -1,0 +1,114 @@
+model:
+  class_name: diff_nerf.diff_nerf_ddm_const_part.DDPM
+  image_size: [ 64, 64, 64 ]
+  std_scale: 3.28
+  ckpt_path:
+  ignore_keys: [ ]
+  only_model: False
+  timesteps: 1000
+  train_sample: -1
+  sampling_timesteps: 20
+  loss_type: l2
+  use_l1: False
+  objective: pred_KC
+  start_dist: normal
+  perceptual_weight: 0
+#  scale_factor: 0.4254
+#  scale_by_std: True
+#  scale_factor: 0.4
+#  default_scale: True
+#  scale_by_softsign: False
+  eps: !!float 1e-3
+  weighting_loss: True
+  render_start: 0
+  nerf:
+    class_name: diff_nerf.nerf_module.NeRF
+    num_parts: 4
+    part_fea_dim: 16
+    in_maskcache_sampling: False
+    hwf: [ 800, 800, 1111.1113654242622 ]  # default hwf
+    near: 2
+    far: 4
+    ndc: False
+    render_factor: 0
+    inverse_y: False
+    flip_x: False
+    flip_y: False
+    stepsize: 0.25
+    bg: 1
+    render_depth: False
+    rotate_flag: False
+    N_rand: 8192
+    inner_iter: 10
+    weight_main: 3. # 1 default
+    weight_entropy_last: 0.003 # 0.001 default
+    weight_rgbper: 0.03 # 0.01 default
+    weight_tv: !!float 1e-6
+    weight_cls: 0.1
+    weight_mask: 3.
+    weight_ind_en: 0.1
+    weight_comparable: 0.01
+    weight_coverage: 0.01
+    dvgo:
+      xyz_min: [ -1, -1, -1 ]  # default
+      xyz_max: [ 1, 1, 1 ]
+      num_voxels: 262144
+      num_voxels_base: 262144
+      alpha_init: 0.01
+      fast_color_thres: 0.0001
+      mask_cache_thres: 0.001
+      rgbnet_dim: 4
+      viewbase_pe: 4
+      rgbnet_direct: True
+      rgbnet_full_implicit: False
+      rgbnet_depth: 6
+      rgbnet_width: 128
+
+  unet:
+    class_name: diff_nerf.uncond_3dunet_sb.Unet3D
+    dim: 64
+    dim_mults: [1, 2, 4]
+    channels: 5
+    resnet_block_groups: 8
+    heads: 4
+    learned_sinusoidal_dim: 16
+    window_size_q: [[8, 8, 8], [4, 4, 4], [2, 2, 2], [2, 2, 2]]
+    window_size_k: [[[8, 8, 8], [4, 4, 4], [2, 2, 2]],
+                    [[4, 4, 4], [2, 2, 2]],
+                    [[2, 2, 2], [1, 1, 1]],
+                    [[2, 2, 2], [1, 1, 1]]]
+    out_mul: 1
+
+data:
+  class_name: diff_nerf.data.VolumeDataset
+  data_type: 'blender'
+  cls_names: ['03001627', ]
+  tar_path: '/media/huang/T7/data/diff_nerf/DVGO_results_64x64x64'
+  image_path: '/media/huang/T7/data/diff_nerf/ShapeNet_Render'
+  load_rgb_net: False
+  load_mask_cache: False
+  use_rotate_ransform: False
+  batch_size: 1
+  white_bkgd: True
+  load_render_kwargs: True
+  load_mask: True
+  sample_num: 5
+  normalize: False
+  maxm: 191.3546
+  minm: -258.9259
+
+trainer:
+  gradient_accumulate_every: 8  # not true gradient_accumulate_every, but used for optimize g and d alternately
+  lr: !!float 5e-5
+  min_lr: !!float 1e-5
+  train_wd: !!float 1e-2
+  train_num_steps: 200000
+  save_and_sample_every: 10000
+  log_freq: 500
+  results_folder: '/media/huang/T7/data/diff_nerf/results_uncond_ddm_const_dpm_3dunet_sb_joint'
+  amp: False
+  fp16: False
+  test_before: True
+  resume_milestone: current
+  ema_update_after_step: 20000
+  ema_update_every: 10

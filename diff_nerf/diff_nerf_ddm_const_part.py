@@ -52,13 +52,13 @@ class DDPM(nn.Module):
     def __init__(
         self,
         model,
+        model_n,
         *,
         image_size,
         timesteps = 1000,
         sampling_timesteps = None,
         loss_type = 'l1',
         objective = 'pred_noise',
-        original_elbo_weight=0.,
         clip_x_start=True,
         train_sample=-1,
         input_keys=['input'],
@@ -66,16 +66,18 @@ class DDPM(nn.Module):
         use_l1=False,
         **kwargs
     ):
+        super().__init__()
         ckpt_path = kwargs.pop("ckpt_path", None)
         ignore_keys = kwargs.pop("ignore_keys", [])
         only_model = kwargs.pop("only_model", False)
         cfg = kwargs.pop("cfg", None)
-        super().__init__(**kwargs)
         self.model = model
+        self.nerf = model_n
         self.channels = self.model.channels
         self.self_condition = self.model.self_condition
         self.input_keys = input_keys
         self.cfg = cfg
+        self.register_buffer('std_scale', torch.FloatTensor([cfg.std_scale]))
         self.eps = cfg.get('eps', 1e-4) if cfg is not None else 1e-4
         self.weighting_loss = cfg.get("weighting_loss", False) if cfg is not None else False
         self.use_render_loss = cfg.get('use_render_loss', False)
@@ -92,34 +94,30 @@ class DDPM(nn.Module):
         self.num_timesteps = int(timesteps)
         self.time_range = list(range(self.num_timesteps + 1))
         self.loss_type = loss_type
-        self.original_elbo_weight = original_elbo_weight
-
         # sampling related parameters
-
         self.sampling_timesteps = default(sampling_timesteps, timesteps) # default num sampling timesteps to number of timesteps at training
-
         assert self.sampling_timesteps <= timesteps
         # helper function to register buffer from float64 to float32
         self.use_l1 = use_l1
         # self.perceptual_weight = perceptual_weight
         # if self.perceptual_weight > 0:
         #     self.perceptual_loss = LPIPS().eval()
-
+        '''
         # dvgo kwargs #
-        self.register_buffer('xyz_min', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_min))
-        self.register_buffer('xyz_max', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_max))
-        self.fast_color_thres = self.cfg.render_kwargs.dvgo.fast_color_thres
-        self.mask_cache_thres = self.cfg.render_kwargs.dvgo.mask_cache_thres
+        self.register_buffer('xyz_min', torch.Tensor(self.cfg.dvgo.xyz_min))
+        self.register_buffer('xyz_max', torch.Tensor(self.cfg.dvgo.xyz_max))
+        self.fast_color_thres = self.cfg.dvgo.fast_color_thres
+        self.mask_cache_thres = self.cfg.dvgo.mask_cache_thres
 
         # determine based grid resolution
-        self.num_voxels_base = self.cfg.render_kwargs.dvgo.num_voxels_base
+        self.num_voxels_base = self.cfg.dvgo.num_voxels_base
         self.voxel_size_base = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels_base).pow(1 / 3)
 
         # determine the density bias shift
-        self.alpha_init = self.cfg.render_kwargs.dvgo.alpha_init
+        self.alpha_init = self.cfg.dvgo.alpha_init
         self.register_buffer('act_shift', torch.FloatTensor([np.log(1 / (1 - self.alpha_init) - 1)]))
         self.act_shift -= 4
-        self.num_voxels = self.cfg.render_kwargs.dvgo.num_voxels
+        self.num_voxels = self.cfg.dvgo.num_voxels
         self.voxel_size = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels).pow(1 / 3)
         self.world_size = ((self.xyz_max - self.xyz_min) / self.voxel_size).long()
         self.voxel_size_ratio = self.voxel_size / self.voxel_size_base
@@ -128,20 +126,30 @@ class DDPM(nn.Module):
         #     assert type(colorize_nlabels)==int
         #     self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
 
-        viewbase_pe = self.cfg.render_kwargs.dvgo.viewbase_pe
+        viewbase_pe = self.cfg.dvgo.viewbase_pe
         self.register_buffer('viewfreq', torch.FloatTensor([(2 ** i) for i in range(viewbase_pe)]))
-        self.use_barf_pe = self.cfg.render_kwargs.dvgo.get('use_barf_pe', False)
+        self.use_barf_pe = self.cfg.dvgo.get('use_barf_pe', False)
         # self.residual = MultiScaleAttentionGrid(embed_dim - 1, grid_size=cfg.grid_size)
         dim0 = (3 + 3 * viewbase_pe * 2)
-        if self.cfg.render_kwargs.dvgo.rgbnet_full_implicit:
+        if self.cfg.dvgo.rgbnet_full_implicit:
             pass
-        elif self.cfg.render_kwargs.dvgo.rgbnet_direct:
-            dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim #* (1 + len(self.residual.grid_size))
+        elif self.cfg.dvgo.rgbnet_direct:
+            dim0 += self.cfg.dvgo.rgbnet_dim #* (1 + len(self.residual.grid_size))
         else:
-            dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim - 3
-        rgbnet_width = cfg.render_kwargs.dvgo.rgbnet_width
-        rgbnet_depth = cfg.render_kwargs.dvgo.rgbnet_depth
+            dim0 += self.cfg.dvgo.rgbnet_dim - 3
+        rgbnet_width = cfg.dvgo.rgbnet_width
+        rgbnet_depth = cfg.dvgo.rgbnet_depth
 
+        # part kwargs
+        self.num_parts = self.cfg.get('num_parts', 8)
+        self.part_fea_dim = self.cfg.get('part_fea_dim', 128)
+        self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
+        nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
+        dim_index = 3 + 3 * viewbase_pe * 2
+        self.index_mlp = IndexMLP(in_dim=dim_index, out_dim=self.num_part+1, part_dim=self.part_fea_dim)
+
+        dim0 += self.part_fea_dim
         # part render mlps
         self.rgbnets = nn.ModuleList()
         for _ in self.num_parts:
@@ -155,16 +163,7 @@ class DDPM(nn.Module):
             )
             nn.init.constant_(rgbnet[-1].bias, 0)
             self.rgbnets.append(rgbnet)
-
-        # part kwargs
-        self.num_parts = self.cfg.get('num_parts', 8)
-        self.part_fea_dim = self.cfg.get('part_fea_dim', 128)
-        self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
-        nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
-        self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
-        dim_index = 3 + 3 * viewbase_pe * 2
-        self.index_mlp = IndexMLP(dim_index, self.num_part, part_dim=self.part_fea_dim)
-
+        '''
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys, only_model)
 
@@ -197,15 +196,18 @@ class DDPM(nn.Module):
 
     def get_input(self, batch, return_first_stage_outputs=False, return_original_cond=False):
         assert 'input' in self.input_keys;
-        if len(self.input_keys) > len(batch.keys()):
-            x, *_ = batch.values()
-        else:
-            x = batch.values()
-        return x
+        # if len(self.input_keys) > len(batch.keys()):
+        #     x, *_ = batch.values()
+        # else:
+        #     x = batch.values()
+        x = batch['input']
+        x = x / self.cfg.std_scale
+        batch['input'] = x
+        return batch
 
     def training_step(self, batch):
-        z, *_ = self.get_input(batch)
-        loss, loss_dict = self(z)
+        batch = self.get_input(batch)
+        loss, loss_dict = self(batch)
         return loss, loss_dict
 
     def forward(self, x, *args, **kwargs):
@@ -238,7 +240,8 @@ class DDPM(nn.Module):
         xtms = mean + sigma * epsilon
         return xtms
 
-    def p_losses(self, x_start, t, noise=None, **kwargs):
+    def p_losses(self, batch, t, noise=None, global_step=1e9, **kwargs):
+        x_start = batch['input']
         if self.start_dist == 'normal':
             noise = torch.randn_like(x_start)
         elif self.start_dist == 'uniform':
@@ -273,337 +276,20 @@ class DDPM(nn.Module):
         loss_simple = loss_simple.mean()
         loss_dict.update({f'{prefix}/loss_simple': loss_simple})
         rec_weight = (1 - t.reshape(C.shape[0], 1)) ** 2
+        render_weight = -torch.log(t.reshape(C.shape[0], 1)) / 2
         loss_vlb += torch.abs(x_rec - target3).mean([1, 2, 3, 4]) * rec_weight
         loss_vlb = loss_vlb.mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
         loss = loss_simple + loss_vlb
-        if self.use_render_loss:
+        if self.use_render_loss and global_step >= self.cfg.get('render_start', 0):
             render_kwargs = kwargs["render_kwargs"]
-            loss_render = self.render_loss(x_rec, render_kwargs) * rec_weight
+            loss_render = self.nerf(x_rec * self.cfg.std_scale, render_kwargs, loss_weight=render_weight)
+            # loss_render = self.render_loss(x_rec * self.std_scale, render_kwargs) * render_weight
             # loss_render = loss_render.mean()
             loss_dict.update({f'{prefix}/loss_render': loss_render})
-            loss += loss_render
+            # loss += loss_render
         loss_dict.update({f'{prefix}/loss': loss})
         return loss, loss_dict
-
-    def render_loss(self, field, render_kwargs):
-        # field =
-        # assert len(render_kwargs) == len(field);
-        HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss = [
-            render_kwargs[k] for k in [
-                'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'images', 'masks'
-            ]
-        ]
-        loss = 0.
-        densities = field[:, 0]
-        features = field[:, 1:]
-        # features = features + self.residual(features)
-        for dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images, masks in \
-                zip(densities, features, HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss):
-            device = dens.device
-            rgb_tr_ori = images.to(device)
-            render_kwarg_train = {
-                'near': self.cfg.render_kwargs.near,
-                'far': self.cfg.render_kwargs.far,
-                'bg': self.cfg.render_kwargs.bg,
-                'rand_bkgd': False,
-                'stepsize': self.cfg.render_kwargs.stepsize,
-                'inverse_y': self.cfg.render_kwargs.inverse_y,
-                'flip_x': self.cfg.render_kwargs.flip_x,
-                'flip_y': self.cfg.render_kwargs.flip_y,
-            }
-            if self.cfg.render_kwargs.get('in_maskcache_sampling', True):
-                rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.get_training_rays_in_maskcache_sampling(
-                    rgb_tr_ori=rgb_tr_ori,
-                    train_poses=poses,
-                    HW=HW, Ks=Ks,
-                    ndc=False, inverse_y=False,
-                    flip_x=False, flip_y=False,
-                    density=dens,
-                    render_kwargs=render_kwarg_train)
-            else:
-                rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.first_stage_model.get_training_rays_flatten(
-                    rgb_tr_ori=rgb_tr_ori,
-                    train_poses=poses,
-                    HW=HW, Ks=Ks,
-                    ndc=False, inverse_y=render_kwarg_train['inverse_y'],
-                    flip_x=render_kwarg_train['flip_x'], flip_y=render_kwarg_train['flip_y'],
-                )
-            sel_b = torch.randint(rgb_tr.shape[0], [self.cfg.render_kwargs.N_rand])
-            # sel_r = torch.randint(rgb_tr.shape[1], [self.cfg.render_kwargs.N_rand])
-            # sel_c = torch.randint(rgb_tr.shape[2], [self.cfg.render_kwargs.N_rand])
-            # target = rgb_tr[sel_b, sel_r, sel_c].to(device)
-            # rays_o = rays_o_tr[sel_b, sel_r, sel_c].to(device)
-            # rays_d = rays_d_tr[sel_b, sel_r, sel_c].to(device)
-            # viewdirs = viewdirs_tr[sel_b, sel_r, sel_c]
-            target = rgb_tr[sel_b].to(device)
-            rays_o = rays_o_tr[sel_b].to(device)
-            rays_d = rays_d_tr[sel_b].to(device)
-            viewdirs = viewdirs_tr[sel_b]
-            render_result = self.render_train(dens, fea, rays_o, rays_d, viewdirs, **render_kwarg_train)
-            loss_main = self.cfg.render_kwargs.weight_main * F.mse_loss(render_result['rgb_marched'], target)
-            pout = render_result['alphainv_last'].clamp(1e-6, 1 - 1e-6)
-            entropy_last_loss = -(pout * torch.log(pout) + (1 - pout) * torch.log(1 - pout)).mean()
-            loss_entropy_last = self.cfg.render_kwargs.weight_entropy_last * entropy_last_loss
-            rgbper = (render_result['raw_rgb'] - target[render_result['ray_id']]).pow(2).sum(-1)
-            rgbper_loss = (rgbper * render_result['weights'].detach()).sum() / len(rays_o)
-            loss_rgbper = self.cfg.render_kwargs.weight_rgbper * rgbper_loss
-            loss += loss_main + loss_entropy_last + loss_rgbper
-            torch.cuda.empty_cache()
-        return loss
-
-    @torch.no_grad()
-    def get_training_rays_in_maskcache_sampling(self, rgb_tr_ori, train_poses, HW, Ks, ndc, inverse_y, flip_x, flip_y,
-                                                density,
-                                                render_kwargs):
-        # print('get_training_rays_in_maskcache_sampling: start')
-        assert len(rgb_tr_ori) == len(train_poses) and len(rgb_tr_ori) == len(Ks) and len(rgb_tr_ori) == len(HW)
-        CHUNK = 64
-        DEVICE = rgb_tr_ori[0].device
-        # eps_time = time.time()
-        N = sum(im.shape[0] * im.shape[1] for im in rgb_tr_ori)
-        rgb_tr = torch.zeros([N, 3], device=DEVICE)
-        rays_o_tr = torch.zeros_like(rgb_tr)
-        rays_d_tr = torch.zeros_like(rgb_tr)
-        viewdirs_tr = torch.zeros_like(rgb_tr)
-        imsz = []
-        top = 0
-        for c2w, img, (H, W), K in zip(train_poses, rgb_tr_ori, HW, Ks):
-            assert img.shape[:2] == (H, W)
-            rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
-                H=H, W=W, K=K, c2w=c2w, ndc=ndc,
-                inverse_y=inverse_y, flip_x=flip_x, flip_y=flip_y)
-            mask = torch.empty(img.shape[:2], device=DEVICE, dtype=torch.bool)
-            for i in range(0, img.shape[0], CHUNK):
-                mask[i:i + CHUNK] = self.hit_coarse_geo(
-                    rays_o=rays_o[i:i + CHUNK], rays_d=rays_d[i:i + CHUNK], density=density, **render_kwargs).to(DEVICE)
-            n = mask.sum()
-            rgb_tr[top:top + n].copy_(img[mask])
-            rays_o_tr[top:top + n].copy_(rays_o[mask].to(DEVICE))
-            rays_d_tr[top:top + n].copy_(rays_d[mask].to(DEVICE))
-            viewdirs_tr[top:top + n].copy_(viewdirs[mask].to(DEVICE))
-            imsz.append(n)
-            top += n
-
-        # print('get_training_rays_in_maskcache_sampling: ratio', top / N)
-        rgb_tr = rgb_tr[:top]
-        rays_o_tr = rays_o_tr[:top]
-        rays_d_tr = rays_d_tr[:top]
-        viewdirs_tr = viewdirs_tr[:top]
-        # eps_time = time.time() - eps_time
-        # print('get_training_rays_in_maskcache_sampling: finish (eps time:', eps_time, 'sec)')
-        return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz
-
-    @torch.no_grad()
-    def get_training_rays_in_maskcache_sampling(self, rgb_tr_ori, train_poses, HW, Ks, ndc, inverse_y, flip_x, flip_y,
-                                                density,
-                                                render_kwargs):
-        # print('get_training_rays_in_maskcache_sampling: start')
-        assert len(rgb_tr_ori) == len(train_poses) and len(rgb_tr_ori) == len(Ks) and len(rgb_tr_ori) == len(HW)
-        CHUNK = 64
-        DEVICE = rgb_tr_ori[0].device
-        # eps_time = time.time()
-        N = sum(im.shape[0] * im.shape[1] for im in rgb_tr_ori)
-        rgb_tr = torch.zeros([N, 3], device=DEVICE)
-        rays_o_tr = torch.zeros_like(rgb_tr)
-        rays_d_tr = torch.zeros_like(rgb_tr)
-        viewdirs_tr = torch.zeros_like(rgb_tr)
-        imsz = []
-        top = 0
-        for c2w, img, (H, W), K in zip(train_poses, rgb_tr_ori, HW, Ks):
-            assert img.shape[:2] == (H, W)
-            rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
-                H=H, W=W, K=K, c2w=c2w, ndc=ndc,
-                inverse_y=inverse_y, flip_x=flip_x, flip_y=flip_y)
-            mask = torch.empty(img.shape[:2], device=DEVICE, dtype=torch.bool)
-            for i in range(0, img.shape[0], CHUNK):
-                mask[i:i + CHUNK] = self.hit_coarse_geo(
-                    rays_o=rays_o[i:i + CHUNK], rays_d=rays_d[i:i + CHUNK], density=density, **render_kwargs).to(DEVICE)
-            n = mask.sum()
-            rgb_tr[top:top + n].copy_(img[mask])
-            rays_o_tr[top:top + n].copy_(rays_o[mask].to(DEVICE))
-            rays_d_tr[top:top + n].copy_(rays_d[mask].to(DEVICE))
-            viewdirs_tr[top:top + n].copy_(viewdirs[mask].to(DEVICE))
-            imsz.append(n)
-            top += n
-
-        # print('get_training_rays_in_maskcache_sampling: ratio', top / N)
-        rgb_tr = rgb_tr[:top]
-        rays_o_tr = rays_o_tr[:top]
-        rays_d_tr = rays_d_tr[:top]
-        viewdirs_tr = viewdirs_tr[:top]
-        # eps_time = time.time() - eps_time
-        # print('get_training_rays_in_maskcache_sampling: finish (eps time:', eps_time, 'sec)')
-        return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz
-
-    def hit_coarse_geo(self, rays_o, rays_d, density, near, stepsize, **render_kwargs):
-        far = 1e9  # the given far can be too small while rays stop when hitting scene bbox
-        shape = rays_o.shape[:-1]
-        rays_o = rays_o.reshape(-1, 3).contiguous()
-        rays_d = rays_d.reshape(-1, 3).contiguous()
-        stepdist = stepsize * self.voxel_size
-        ray_pts, mask_outbbox, ray_id = render_utils_cuda.sample_pts_on_rays(
-            rays_o, rays_d, self.xyz_min, self.xyz_max, near, far, stepdist)[:3]
-        mask_inbbox = ~mask_outbbox
-        hit = torch.zeros([len(rays_o)], dtype=torch.bool)
-        mask_cache = self.forward_mask(density, ray_pts[mask_inbbox])
-        hit[ray_id[mask_inbbox][mask_cache]] = 1
-        return hit.reshape(shape)
-
-    def forward_mask(self, density, xyz):
-        # density: X, Y, Z
-        dens = density.unsqueeze(0).unsqueeze(0)
-        dens = F.max_pool3d(dens, kernel_size=3, padding=1, stride=1)
-        alpha = 1 - torch.exp(
-            -F.softplus(dens + self.act_shift * self.voxel_size_ratio))
-        mask = (alpha >= self.mask_cache_thres).squeeze(0).squeeze(0)
-        xyz_len = self.xyz_max - self.xyz_min
-        xyz2ijk_scale = (torch.Tensor(list(mask.shape)).to(dens.device) - 1) / xyz_len
-        xyz2ijk_shift = -self.xyz_min * xyz2ijk_scale
-        shape = xyz.shape[:-1]
-        xyz = xyz.reshape(-1, 3)
-        mask_cache = render_utils_cuda.maskcache_lookup(mask, xyz, xyz2ijk_scale, xyz2ijk_shift)
-        mask_cache = mask_cache.reshape(shape)
-        return mask_cache
-
-    def forward_grid(self, grid, xyz):
-        # grid: C, X, Y, Z
-        channels = grid.shape[0]
-        grid = grid.unsqueeze(0)
-        shape = xyz.shape[:-1]
-        xyz = xyz.reshape(1, 1, 1, -1, 3)
-        ind_norm = ((xyz - self.xyz_min) / (self.xyz_max - self.xyz_min)).flip((-1,)) * 2 - 1
-        # print(ind_norm.shape)
-        out = F.grid_sample(grid, ind_norm, mode='bilinear', align_corners=True)
-        # print(out.shape)
-        out = out.reshape(channels, -1).T.reshape(*shape, channels)
-        if channels == 1:
-            out = out.squeeze(-1)
-        return out
-
-    def sample_ray(self, rays_o, rays_d, near, far, stepsize, **render_kwargs):
-        far = 1e9  # the given far can be too small while rays stop when hitting scene bbox
-        rays_o = rays_o.contiguous()
-        rays_d = rays_d.contiguous()
-        stepdist = stepsize * self.voxel_size
-        ray_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max = render_utils_cuda.sample_pts_on_rays(
-            rays_o, rays_d, self.xyz_min, self.xyz_max, near, far, stepdist)
-        mask_inbbox = ~mask_outbbox
-        ray_pts = ray_pts[mask_inbbox]
-        ray_id = ray_id[mask_inbbox]
-        step_id = step_id[mask_inbbox]
-        return ray_pts, ray_id, step_id
-
-    def activate_density(self, density, interval=None):
-        interval = interval if interval is not None else self.voxel_size_ratio
-        shape = density.shape
-        return dvgo.Raw2Alpha.apply(density.flatten(), self.act_shift, interval).reshape(shape)
-
-    def render_train(self, dens, fea, rays_o, rays_d, viewdirs, **render_kwargs):
-        assert len(rays_o.shape) == 2 and rays_o.shape[-1] == 3, 'Only suuport point queries in [N, 3] format'
-        # for fie in field:
-        ret_dict = {}
-        N = len(rays_o)
-
-        # sample points on rays
-        ray_pts, ray_id, step_id = self.sample_ray(
-            rays_o=rays_o, rays_d=rays_d, **render_kwargs)
-        interval = render_kwargs['stepsize'] * self.voxel_size_ratio
-
-        density = dens
-        # skip known free space
-        mask = self.forward_mask(density, ray_pts)
-        # if self.mask_cache is not None:
-        # mask = self.mask_cache(ray_pts)
-        ray_pts = ray_pts[mask]
-        ray_id = ray_id[mask]
-        step_id = step_id[mask]
-
-        ### flip
-        # self.density.grid.data = torch.flip(self.density.grid.data, dims=[-3, -2, -1])
-        # self.k0.grid.data = torch.flip(self.k0.grid.data, dims=[-3, -2, -1])
-        # query for alpha w/ post-activation
-        density = self.forward_grid(density.unsqueeze(0), ray_pts)
-        # density = self.density(ray_pts)
-        alpha = self.activate_density(density, interval)
-        if self.fast_color_thres > 0:
-            mask = (alpha > self.fast_color_thres)
-            ray_pts = ray_pts[mask]
-            ray_id = ray_id[mask]
-            step_id = step_id[mask]
-            density = density[mask]
-            alpha = alpha[mask]
-
-        # compute accumulated transmittance
-        weights, alphainv_last = dvgo.Alphas2Weights.apply(alpha, ray_id, N)
-        if self.fast_color_thres > 0:
-            mask = (weights > self.fast_color_thres)
-            weights = weights[mask]
-            alpha = alpha[mask]
-            ray_pts = ray_pts[mask]
-            ray_id = ray_id[mask]
-            step_id = step_id[mask]
-
-        # query for color
-        # if self.rgbnet_full_implicit:
-        #     pass
-        # else:
-        #     k0 = self.k0(ray_pts)
-        batch = ray_pts.shape[0]
-        k0 = self.forward_grid(fea, ray_pts)
-        rays_xyz = (ray_pts - self.xyz_min) / (self.xyz_max - self.xyz_min)
-        xyz_emb = (rays_xyz.unsqueeze(-1) * self.posfreq).flatten(-2)
-        xyz_emb = torch.cat([rays_xyz, xyz_emb.sin(), xyz_emb.cos()], -1)
-        part_fea = self.part_mlp(self.part_embeddings.weight).expand(batch, -1, -1)
-        mask_feat = self.index_mlp()
-        mask_feat = torch.cat([], dim=-1)
-
-        if self.rgbnet is None:
-            # no view-depend effect
-            rgb = torch.sigmoid(k0)
-        else:
-            # view-dependent color emission
-            if self.cfg.render_kwargs.dvgo.rgbnet_direct:
-                k0_view = k0
-            else:
-                k0_view = k0[:, 3:]
-                k0_diffuse = k0[:, :3]
-            viewdirs_emb = (viewdirs.unsqueeze(-1) * self.viewfreq).flatten(-2)
-            viewdirs_emb = torch.cat([viewdirs, viewdirs_emb.sin(), viewdirs_emb.cos()], -1)
-            viewdirs_emb = viewdirs_emb.flatten(0, -2)[ray_id]
-            rgb_feat = torch.cat([k0_view, viewdirs_emb], -1)
-            rgb_logit = self.rgbnet(rgb_feat)
-            if self.cfg.render_kwargs.dvgo.rgbnet_direct:
-                rgb = torch.sigmoid(rgb_logit)
-            else:
-                rgb = torch.sigmoid(rgb_logit + k0_diffuse)
-
-        # Ray marching
-        rgb_marched = segment_coo(
-            src=(weights.unsqueeze(-1) * rgb),
-            index=ray_id,
-            out=torch.zeros([N, 3], device=weights.device),
-            reduce='sum')
-        rgb_marched += (alphainv_last.unsqueeze(-1) * render_kwargs['bg'])
-        ret_dict.update({
-            'alphainv_last': alphainv_last,
-            'weights': weights,
-            'rgb_marched': rgb_marched,
-            'raw_alpha': alpha,
-            'raw_rgb': rgb,
-            'ray_id': ray_id,
-        })
-
-        if render_kwargs.get('render_depth', False):
-            with torch.no_grad():
-                depth = segment_coo(
-                    src=(weights * step_id),
-                    index=ray_id,
-                    out=torch.zeros([N], device=weights.device),
-                    reduce='sum')
-            ret_dict.update({'depth': depth})
-
-        return ret_dict
 
     def get_loss(self, pred, target, mean=True):
         if self.loss_type == 'l1':
@@ -621,17 +307,16 @@ class DDPM(nn.Module):
         return loss
 
     @torch.no_grad()
-    def sample(self, batch_size=16, up_scale=1, cond=None, denoise=True):
+    def sample(self, batch_size=16, up_scale=1, cond=None, mask=None, denoise=True):
         image_size, channels = self.image_size, self.channels
         if cond is not None:
             batch_size = cond.shape[0]
         return self.sample_fn((batch_size, channels, image_size[0], image_size[1], image_size[2]),
-                              up_scale=up_scale, unnormalize=True, cond=cond, denoise=denoise)
+                              up_scale=up_scale, unnormalize=True, cond=cond, mask=mask, denoise=denoise)
 
     @torch.no_grad()
-    def sample_fn(self, shape, up_scale=1, unnormalize=True, cond=None, denoise=False):
-        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], \
-            self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+    def sample_fn(self, shape, up_scale=1, unnormalize=True, cond=None, mask=None, denoise=False):
+        batch, device = shape[0], self.std_scale.device
 
         # times = torch.linspace(-1, total_timesteps, steps=self.sampling_timesteps + 1).int()
         # times = list(reversed(times.int().tolist()))
@@ -650,7 +335,7 @@ class DDPM(nn.Module):
             img = 2 * torch.rand(shape, device=device) - 1.
         else:
             raise NotImplementedError(f'{self.start_dist} is not supported !')
-        img = F.interpolate(img, scale_factor=up_scale, mode='bilinear', align_corners=True)
+        img = F.interpolate(img, scale_factor=up_scale, mode='trilinear', align_corners=True)
         # K = -1 * torch.ones_like(img)
         cur_time = torch.ones((batch,), device=device)
         for i, time_step in enumerate(time_steps):
@@ -673,6 +358,187 @@ class DDPM(nn.Module):
         if unnormalize:
             img = unnormalize_to_zero_to_one(img)
         return img
+
+    @torch.no_grad()
+    def render_img(self, inputs, render_kwargs):
+        input = inputs['input']
+        cond = inputs['cond'] if 'cond' in inputs else None
+        mask = inputs['mask'] if 'mask' in inputs else None
+        rotate_flag = render_kwargs.rotate_flag
+        if rotate_flag:
+            angle, axes = inputs['rotate_params']
+        device = self.std_scale.device
+        H, W, focal = render_kwargs.hwf
+        K = np.array([
+            [focal, 0, 0.5 * W],
+            [0, focal, 0.5 * H],
+            [0, 0, 1]
+        ])
+        try:
+            render_poses = inputs['render_kwargs']['poses']
+        except:
+            render_pose = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180, 180, 5)[:-1]],
+                                      0)
+            render_poses = [render_pose for _ in range(input.shape[0])]
+        # Ks = render_kwargs['Ks']
+        ndc = render_kwargs.ndc
+        render_factor = render_kwargs.render_factor
+        if render_factor != 0:
+            # HW = np.copy(HW)
+            # Ks = np.copy(Ks)
+            H = (H / render_factor).astype(int)
+            W = (W / render_factor).astype(int)
+            K[:2, :3] /= render_factor
+
+        #### model ####
+        reconstructions = self.sample(batch_size=input.shape[0], up_scale=1, cond=cond, mask=mask)
+        # cls_logits = self.first_stage_model.classifier(reconstructions)
+        # cls_ids = torch.max(cls_logits, 1)[1]
+        reconstructions = reconstructions * self.cfg.std_scale
+
+        if rotate_flag:
+            reconstructions = self.inv_rotate(reconstructions.detach().cpu().numpy(), angle, axes).to(device)
+        # reconstructions = input
+        rgbs = []
+        depths = []
+        bgmaps = []
+        for idx_obj in range(reconstructions.shape[0]):
+
+            # rgbs = []
+            # depths = []
+            # bgmaps = []
+            dens = reconstructions[idx_obj][0]
+            fea = reconstructions[idx_obj][1:]
+            # fea = fea + self.first_stage_model.residual(fea.unsqueeze(0))[0]
+            render_pose = render_poses[idx_obj]
+
+            # render_kwargs['class_id'] = cls_ids[idx_obj].item()
+            for i, c2w in enumerate(render_pose):
+                # H, W = HW[i]
+                # K = Ks[i]
+                # H, W = HW
+                # K = Ks
+                c2w = torch.Tensor(c2w)
+                rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
+                    H, W, K, c2w, ndc, inverse_y=render_kwargs.inverse_y,
+                    flip_x=render_kwargs.flip_x, flip_y=render_kwargs.flip_y)
+                keys = ['rgb_marched', 'depth', 'alphainv_last']
+                rays_o = rays_o.flatten(0, -2).to(device)
+                rays_d = rays_d.flatten(0, -2).to(device)
+                viewdirs = viewdirs.flatten(0, -2).to(device)
+                render_result_chunks = [
+                    {k: v for k, v in
+                     self.nerf.render_train(dens, fea, ro, rd, vd, **render_kwargs).items() if k in keys}
+                    for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
+                ]
+                render_result = {
+                    k: torch.cat([ret[k] for ret in render_result_chunks]).reshape(H, W, -1)
+                    for k in render_result_chunks[0].keys()
+                }
+
+                if render_kwargs.render_depth:
+                    depth = render_result['depth'].cpu().numpy()
+                    depths.append(depth)
+                rgb = render_result['rgb_marched'].cpu().numpy()
+                bgmap = render_result['alphainv_last'].cpu().numpy()
+                rgbs.append(rgb)
+                bgmaps.append(bgmap)
+            # rgbs = np.array(rgbs)
+            # depths = np.array(depths)
+            # bgmaps = np.array(bgmaps)
+        rgbs = np.array(rgbs)
+        depths = np.array(depths)
+        bgmaps = np.array(bgmaps)
+        # del model
+        torch.cuda.empty_cache()
+        return rgbs, depths, bgmaps
+
+    @torch.no_grad()
+    def render_img_sample(self, batch_size, render_kwargs):
+        device = self.scale_factor.device
+        H, W, focal = render_kwargs.hwf
+        K = np.array([
+            [focal, 0, 0.5 * W],
+            [0, focal, 0.5 * H],
+            [0, 0, 1]
+        ])
+
+        render_pose = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180, 180, 10)[:-1]],
+                                  0)
+        render_poses = [render_pose for _ in range(batch_size)]
+        # Ks = render_kwargs['Ks']
+        ndc = render_kwargs.ndc
+        render_factor = render_kwargs.render_factor
+        if render_factor != 0:
+            # HW = np.copy(HW)
+            # Ks = np.copy(Ks)
+            H = (H / render_factor).astype(int)
+            W = (W / render_factor).astype(int)
+            K[:2, :3] /= render_factor
+
+        #### model ####
+        reconstructions = self.sample(batch_size=batch_size, up_scale=1, cond=None, mask=None, device=device)
+        try:
+            cls_logits = self.first_stage_model.classifier(reconstructions)
+            cls_ids = torch.max(cls_logits, 1)[1]
+        except:
+            cls_ids = None
+        reconstructions = reconstructions * self.first_stage_model.std_scale
+
+        # reconstructions = input
+        rgbss = []
+        depthss = []
+        bgmapss = []
+        for idx_obj in range(reconstructions.shape[0]):
+
+            rgbs = []
+            depths = []
+            bgmaps = []
+            dens = reconstructions[idx_obj][0]
+            fea = reconstructions[idx_obj][1:]
+            # fea = fea + self.first_stage_model.residual(fea.unsqueeze(0))[0]
+            render_pose = render_poses[idx_obj]
+            if cls_ids is not None:
+                render_kwargs['class_id'] = cls_ids[idx_obj].item()
+            for i, c2w in enumerate(render_pose):
+                # H, W = HW[i]
+                # K = Ks[i]
+                # H, W = HW
+                # K = Ks
+                c2w = torch.Tensor(c2w)
+                rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
+                    H, W, K, c2w, ndc, inverse_y=render_kwargs.inverse_y,
+                    flip_x=render_kwargs.flip_x, flip_y=render_kwargs.flip_y)
+                keys = ['rgb_marched', 'depth', 'alphainv_last']
+                rays_o = rays_o.flatten(0, -2).to(device)
+                rays_d = rays_d.flatten(0, -2).to(device)
+                viewdirs = viewdirs.flatten(0, -2).to(device)
+                render_result_chunks = [
+                    {k: v for k, v in
+                     self.first_stage_model.render_train(dens, fea, ro, rd, vd, **render_kwargs).items() if k in keys}
+                    for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
+                ]
+                render_result = {
+                    k: torch.cat([ret[k] for ret in render_result_chunks]).reshape(H, W, -1)
+                    for k in render_result_chunks[0].keys()
+                }
+
+                if render_kwargs.render_depth:
+                    depth = render_result['depth'].permute(2, 0, 1)
+                    depths.append(depth)
+                rgb = render_result['rgb_marched'].permute(2, 0, 1)
+                bgmap = render_result['alphainv_last'].permute(2, 0, 1)
+                rgbs.append(rgb)
+                bgmaps.append(bgmap)
+            rgbss.append(rgbs)
+            depthss.append(depths)
+            bgmapss.append(bgmaps)
+        # rgbs = np.array(rgbs)
+        # depths = np.array(depths)
+        # bgmaps = np.array(bgmaps)
+        # del model
+        torch.cuda.empty_cache()
+        return rgbss, depthss, bgmapss
 
 
 class LatentDiffusion(DDPM):
@@ -928,12 +794,12 @@ class LatentDiffusion(DDPM):
             render_kwarg_train = {
                 'near': near,
                 'far': far,
-                'bg': self.cfg.first_stage.render_kwargs.bg,
+                'bg': self.cfg.nerf.bg,
                 'rand_bkgd': False,
-                'stepsize': self.cfg.first_stage.render_kwargs.stepsize,
-                'inverse_y': self.cfg.first_stage.render_kwargs.inverse_y,
-                'flip_x': self.cfg.first_stage.render_kwargs.flip_x,
-                'flip_y': self.cfg.first_stage.render_kwargs.flip_y,
+                'stepsize': self.cfg.nerf.stepsize,
+                'inverse_y': self.cfg.nerf.inverse_y,
+                'flip_x': self.cfg.nerf.flip_x,
+                'flip_y': self.cfg.nerf.flip_y,
                 'class_id': cls_id
             }
 
@@ -953,8 +819,8 @@ class LatentDiffusion(DDPM):
                 flip_x=render_kwarg_train['flip_x'], flip_y=render_kwarg_train['flip_y'],
             )
             # render_kwarg.update()
-            for iter in range(self.cfg.first_stage.render_kwargs.inner_iter):
-                sel_b = torch.randint(rgb_tr.shape[0], [self.cfg.first_stage.render_kwargs.N_rand])
+            for iter in range(self.cfg.nerf.inner_iter):
+                sel_b = torch.randint(rgb_tr.shape[0], [self.cfg.nerf.N_rand])
                 # sel_r = torch.randint(rgb_tr.shape[1], [self.cfg.render_kwargs.N_rand])
                 # sel_c = torch.randint(rgb_tr.shape[2], [self.cfg.render_kwargs.N_rand])
                 # target = rgb_tr[sel_b, sel_r, sel_c].to(device)

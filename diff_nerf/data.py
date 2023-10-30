@@ -390,6 +390,8 @@ def load_data(datadir, half_res=False, sample_num=5, split='train',
     else:
         Ks = K
 
+
+
     data_dict = dict(
         hwf=hwf, HW=HW, Ks=Ks,
         near=near, far=far, #near_clip=near_clip,
@@ -402,6 +404,7 @@ def load_data(datadir, half_res=False, sample_num=5, split='train',
         data_dict['depths'] = depths
     if load_mask:
         data_dict['masks'] = masks
+
     return data_dict
 
 def generalTransform(image, x_center, y_center, z_center, transform_matrix, method='linear'):
@@ -573,6 +576,7 @@ def default_collate(batch):
     raise TypeError(default_collate_err_msg_format.format(elem_type))
 
 
+
 if __name__ == '__main__':
     # obj_list = os.listdir('/media/huang/2da18d46-7cba-4259-9abd-0df819bb104c/data/ShapeNet_Render/02876657')
     # obj_list2 = os.listdir('/media/huang/ZX3 512G/data/ShapeNet_Render/02876657')
@@ -581,15 +585,15 @@ if __name__ == '__main__':
     #     if item not in obj_list2:
     #         print(item)
 
-    # tar_path = '/media/huang/T7/data/diff_nerf/DVGO_results_64x64x64'
-    # image_path = '/media/huang/T7/data/diff_nerf/ShapeNet_Render'
-    tar_path = '/media/huang/T7/data/abo_tables/DVGO_results_32x32x32'
-    image_path = '/media/huang/T7/data/abo_tables/tables_train'
+    tar_path = '/media/huang/T7/data/diff_nerf/DVGO_results_64x64x64'
+    image_path = '/media/huang/T7/data/diff_nerf/ShapeNet_Render'
+    # tar_path = '/media/huang/T7/data/abo_tables/DVGO_results_32x32x32'
+    # image_path = '/media/huang/T7/data/abo_tables/tables_train'
     from fvcore.common.config import CfgNode
     cfg = CfgNode({'white_bkgd': True,
-                      'data_type': 'srn',})
+                      'data_type': 'blender',})
     dataset = VolumeDataset(tar_path, image_path, use_rotate_transform=False, load_render_kwargs=True,
-                            cfg=cfg, sample_num=-1)
+                            cfg=cfg, sample_num=5)
     d = dataset[0]
     sd1 = 0
     sd2 = 0

@@ -77,7 +77,7 @@ data:
   batch_size: 1
   white_bkgd: True
   load_render_kwargs: True
-  sample_num: 5
+  sample_num: 1
   normalize: False
   maxm: 191.3546
   minm: -258.9259

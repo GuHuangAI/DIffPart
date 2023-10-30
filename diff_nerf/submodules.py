@@ -26,12 +26,13 @@ class CrossAttLayer(nn.Module):
 
     def forward(self, x, part_fea):
         b, l, c = x.shape
-        q = self.q_lin(part_fea)
-        k = self.k_lin(x)
-        v = self.v_lin(x)
+        l2 = part_fea.shape[1]
+        q = self.q_lin(x)
+        k = self.k_lin(part_fea)
+        v = self.v_lin(part_fea)
         q = q.view(b, l, self.heads, self.dim_head).transpose(1, 2) # b, head, l, dim_head
-        k = k.view(b, l, self.heads, self.dim_head).transpose(1, 2)
-        v = v.view(b, l, self.heads, self.dim_head).transpose(1, 2)
+        k = k.view(b, l2, self.heads, self.dim_head).transpose(1, 2)
+        v = v.view(b, l2, self.heads, self.dim_head).transpose(1, 2)
 
         q = q * self.scale
         k_t = k.transpose(2, 3)  # transpose
@@ -44,7 +45,7 @@ class CrossAttLayer(nn.Module):
         x = self.norm2(x)
         return x
 class IndexMLP(nn.Module):
-    def __init__(self, in_dim, out_dim, hidden_dim=128, part_dim=128, n_layers=3):
+    def __init__(self, in_dim, out_dim, hidden_dim=128, part_dim=128, n_layers=4):
         super(IndexMLP, self).__init__()
         self.in_layer = nn.Linear(in_dim, hidden_dim)
         self.in_layer_part = nn.Linear(part_dim, hidden_dim)
@@ -61,3 +62,10 @@ class IndexMLP(nn.Module):
             x = hidden_layer(x, part_fea)
         x = self.out_layer(self.act(x))
         return x
+
+if __name__ == '__main__':
+    model = IndexMLP(30, 10)
+    x = torch.rand(1000, 1, 30)
+    part_fea = torch.rand(1000, 8, 128)
+    y = model(x, part_fea)
+    pass
