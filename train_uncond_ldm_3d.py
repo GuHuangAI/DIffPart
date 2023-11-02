@@ -94,6 +94,8 @@ def main(args):
     model_kwargs = {'model': unet, 'auto_encoder': first_stage_model, 'cfg': model_cfg}
     model_kwargs.update(model_cfg)
     ldm = construct_class_by_name(model_kwargs)
+    model_kwargs.pop('model')
+    model_kwargs.pop('auto_encoder')
     # if model_cfg.model_type == 'const_sde':
     #     from diff_nerf.diff_nerf_const_sde_ldm import LatentDiffusion
     # elif model_cfg.model_type == 'const_sde_dis':

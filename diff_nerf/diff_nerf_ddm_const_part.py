@@ -205,16 +205,17 @@ class DDPM(nn.Module):
         batch['input'] = x
         return batch
 
-    def training_step(self, batch):
+    def training_step(self, batch, **kwargs):
         batch = self.get_input(batch)
-        loss, loss_dict = self(batch)
+        loss, loss_dict = self(batch, **kwargs)
         return loss, loss_dict
 
-    def forward(self, x, *args, **kwargs):
+    def forward(self, batch, *args, **kwargs):
         # continuous time, t in [0, 1]
+        x = batch['input']
         eps = self.eps  # smallest time step
         t = torch.rand(x.shape[0], device=x.device) * (1. - eps) + eps
-        return self.p_losses(x, t, *args, **kwargs)
+        return self.p_losses(batch, t, *args, **kwargs)
 
     def q_sample(self, x_start, noise, t, C):
         time = t.reshape(C.shape[0], *((1,) * (len(C.shape) - 1)))
@@ -251,7 +252,7 @@ class DDPM(nn.Module):
         C = -1 * x_start             # U(t) = Ct, U(1) = - x0
         x_noisy = self.q_sample(x_start=x_start, noise=noise, t=t, C=C)  # (b, c, h, w)
         pred = self.model(x_noisy, t, **kwargs)
-        C_pred, noise_pred = pred.chunk(2, dim=1)
+        C_pred, noise_pred = pred
         x_rec = self.pred_x0_from_xt(x_noisy, noise_pred, C_pred, t)
         loss_dict = {}
         prefix = 'train'
@@ -282,12 +283,13 @@ class DDPM(nn.Module):
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
         loss = loss_simple + loss_vlb
         if self.use_render_loss and global_step >= self.cfg.get('render_start', 0):
-            render_kwargs = kwargs["render_kwargs"]
-            loss_render = self.nerf(x_rec * self.cfg.std_scale, render_kwargs, loss_weight=render_weight)
+            render_kwargs = batch["render_kwargs"]
+            loss_render, loss_render_item, psnr = self.nerf(x_rec * self.cfg.std_scale, render_kwargs, loss_weight=render_weight, **kwargs)
             # loss_render = self.render_loss(x_rec * self.std_scale, render_kwargs) * render_weight
             # loss_render = loss_render.mean()
-            loss_dict.update({f'{prefix}/loss_render': loss_render})
-            # loss += loss_render
+            loss_dict.update({f'loss_render': loss_render_item})
+            loss_dict.update({f'psnr': psnr})
+            loss += loss_render
         loss_dict.update({f'{prefix}/loss': loss})
         return loss, loss_dict
 
@@ -455,7 +457,7 @@ class DDPM(nn.Module):
 
     @torch.no_grad()
     def render_img_sample(self, batch_size, render_kwargs):
-        device = self.scale_factor.device
+        device = self.std_scale.device
         H, W, focal = render_kwargs.hwf
         K = np.array([
             [focal, 0, 0.5 * W],
@@ -477,13 +479,13 @@ class DDPM(nn.Module):
             K[:2, :3] /= render_factor
 
         #### model ####
-        reconstructions = self.sample(batch_size=batch_size, up_scale=1, cond=None, mask=None, device=device)
-        try:
-            cls_logits = self.first_stage_model.classifier(reconstructions)
-            cls_ids = torch.max(cls_logits, 1)[1]
-        except:
-            cls_ids = None
-        reconstructions = reconstructions * self.first_stage_model.std_scale
+        reconstructions = self.sample(batch_size=batch_size, up_scale=1, cond=None, mask=None)
+        # try:
+        #     cls_logits = self.first_stage_model.classifier(reconstructions)
+        #     cls_ids = torch.max(cls_logits, 1)[1]
+        # except:
+        #     cls_ids = None
+        reconstructions = reconstructions * self.std_scale
 
         # reconstructions = input
         rgbss = []
@@ -498,8 +500,8 @@ class DDPM(nn.Module):
             fea = reconstructions[idx_obj][1:]
             # fea = fea + self.first_stage_model.residual(fea.unsqueeze(0))[0]
             render_pose = render_poses[idx_obj]
-            if cls_ids is not None:
-                render_kwargs['class_id'] = cls_ids[idx_obj].item()
+            # if cls_ids is not None:
+            #     render_kwargs['class_id'] = cls_ids[idx_obj].item()
             for i, c2w in enumerate(render_pose):
                 # H, W = HW[i]
                 # K = Ks[i]
@@ -515,7 +517,7 @@ class DDPM(nn.Module):
                 viewdirs = viewdirs.flatten(0, -2).to(device)
                 render_result_chunks = [
                     {k: v for k, v in
-                     self.first_stage_model.render_train(dens, fea, ro, rd, vd, **render_kwargs).items() if k in keys}
+                     self.nerf.render_train(dens, fea, ro, rd, vd, **render_kwargs).items() if k in keys}
                     for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
                 ]
                 render_result = {

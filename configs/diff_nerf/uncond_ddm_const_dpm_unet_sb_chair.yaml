@@ -20,11 +20,12 @@ model:
 #  scale_by_softsign: False
   eps: !!float 1e-3
   weighting_loss: True
+  use_render_loss: True
   render_start: 0
   nerf:
     class_name: diff_nerf.nerf_module.NeRF
     num_parts: 4
-    part_fea_dim: 16
+    part_fea_dim: 8
     in_maskcache_sampling: False
     hwf: [ 800, 800, 1111.1113654242622 ]  # default hwf
     near: 2
@@ -37,8 +38,9 @@ model:
     stepsize: 0.25
     bg: 1
     render_depth: False
+    render_mask: True
     rotate_flag: False
-    N_rand: 8192
+    N_rand: 1024
     inner_iter: 10
     weight_main: 3. # 1 default
     weight_entropy_last: 0.003 # 0.001 default
@@ -47,7 +49,7 @@ model:
     weight_cls: 0.1
     weight_mask: 3.
     weight_ind_en: 0.1
-    weight_comparable: 0.01
+    weight_comparable: 0.001
     weight_coverage: 0.01
     dvgo:
       xyz_min: [ -1, -1, -1 ]  # default
@@ -108,7 +110,7 @@ trainer:
   results_folder: '/media/huang/T7/data/diff_nerf/results_uncond_ddm_const_dpm_3dunet_sb_joint'
   amp: False
   fp16: False
-  test_before: True
+  test_before: False
   resume_milestone: current
   ema_update_after_step: 20000
   ema_update_every: 10

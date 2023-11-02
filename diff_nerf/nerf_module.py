@@ -61,14 +61,15 @@ class NeRF(nn.Module):
         nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
         self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
         dim_index = 3 + 3 * viewbase_pe * 2
-        self.index_mlp = IndexMLP(in_dim=dim_index, out_dim=self.num_parts + 1, part_dim=self.part_fea_dim)
+        self.index_mlp = IndexMLP(in_dim=dim_index, out_dim=self.num_parts, part_dim=self.part_fea_dim)
 
-        dim0 += self.part_fea_dim
+        # dim0 += self.part_fea_dim
+        self.feat_mlp = RelateMLP(in_dim=dim0, out_dim=self.part_fea_dim, part_dim=self.part_fea_dim)
         # part render mlps
         self.rgbnets = nn.ModuleList()
         for _ in range(self.num_parts):
             rgbnet = nn.Sequential(
-                nn.Linear(dim0, rgbnet_width), nn.ReLU(inplace=True),
+                nn.Linear(self.part_fea_dim, rgbnet_width), nn.ReLU(inplace=True),
                 *[
                     nn.Sequential(nn.Linear(rgbnet_width, rgbnet_width), nn.ReLU(inplace=True))
                     for _ in range(rgbnet_depth - 2)
@@ -89,8 +90,10 @@ class NeRF(nn.Module):
                 'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'images', 'masks'
             ]
         ]
-        # loss = 0.
-        loss_item = 0.
+        loss = 0.
+        # loss_item = 0.
+        psnr = 0.
+        bs = field.shape[0]
         densities = field[:, 0]
         features = field[:, 1:]
         accelerator = kwargs['accelerator']
@@ -110,6 +113,8 @@ class NeRF(nn.Module):
                 'inverse_y': self.cfg.inverse_y,
                 'flip_x': self.cfg.flip_x,
                 'flip_y': self.cfg.flip_y,
+                'render_mask': self.cfg.render_mask,
+                'render_depth': self.cfg.render_depth
             }
             # loss = 0.
             if self.cfg.get('in_maskcache_sampling', True):
@@ -123,8 +128,9 @@ class NeRF(nn.Module):
                     density=dens,
                     render_kwargs=render_kwarg_train)
             else:
-                rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, mask_tr = self.first_stage_model.get_training_rays_flatten(
+                rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, mask_tr = self.get_training_rays_flatten(
                     rgb_tr_ori=rgb_tr_ori,
+                    masks=masks,
                     train_poses=poses,
                     HW=HW, Ks=Ks,
                     ndc=False, inverse_y=render_kwarg_train['inverse_y'],
@@ -136,12 +142,14 @@ class NeRF(nn.Module):
                 # loss = 0.
                 sel_b = torch.randint(rgb_tr.shape[0], [self.cfg.N_rand])
                 target = rgb_tr[sel_b].to(device)
+                target_m = mask_tr[sel_b].to(device)
                 rays_o = rays_o_tr[sel_b].to(device)
                 rays_d = rays_d_tr[sel_b].to(device)
                 viewdirs = viewdirs_tr[sel_b]
                 render_result = self.render_train(dens, fea, rays_o, rays_d, viewdirs, **render_kwarg_train)
                 loss_main = self.cfg.weight_main * F.mse_loss(render_result['rgb_marched'], target)
-
+                psnr_cur = -10. * torch.log10(loss_main.detach() / self.cfg.weight_main)
+                psnr += psnr_cur
                 pout = render_result['alphainv_last'].clamp(1e-6, 1 - 1e-6)
                 entropy_last_loss = -(pout * torch.log(pout) + (1 - pout) * torch.log(1 - pout)).mean()
                 loss_entropy_last = self.cfg.weight_entropy_last * entropy_last_loss
@@ -151,17 +159,18 @@ class NeRF(nn.Module):
                 loss_ind_entropy = self.cfg.weight_ind_en * self.loss_entropy(render_result['index'])
                 # loss += loss_main + loss_entropy_last + loss_rgbper
                 # torch.cuda.empty_cache()
-                loss = loss_main + loss_entropy_last + loss_rgbper + loss_ind_entropy
+                loss += loss_main + loss_entropy_last + loss_rgbper + loss_ind_entropy
                 if mask_tr is not None:
-                    loss_mask = self.cfg.weight_mask * F.mse_loss(render_result['mask_marched'], mask_tr)
+                    loss_mask = self.cfg.weight_mask * F.mse_loss(render_result['mask_marched'], target_m)
                     loss_comparable = self.cfg.weight_comparable * self.loss_comparable(
-                                                                    render_result['index'], mask_tr)
-                    loss_coverage = self.cfg.weight_coverage * self.loss_coverage(render_result['index_value'], mask_tr)
-                    loss += loss_mask + loss_comparable + loss_coverage
+                                                    render_result['index'], render_result['ray_id'], target_m)
+                    # loss_coverage = self.cfg.weight_coverage * self.loss_coverage(render_result['index_value'], target_m)
+                    loss += loss_mask + loss_comparable # + loss_coverage
                 loss = loss * lw.item()
-                loss_item += loss.detach().item()
-                accelerator.backward(loss)
-        return loss_item
+                # loss_item += loss.detach().item()
+                # accelerator.backward(loss)
+        loss_item = loss.detach().item()
+        return loss/bs/self.cfg.inner_iter, loss_item/bs/self.cfg.inner_iter, psnr/bs/self.cfg.inner_iter
 
     def loss_coverage(self, pred, target):
         positive = target == 1
@@ -169,29 +178,31 @@ class NeRF(nn.Module):
         loss = -torch.log(positive_rays_implicit + 1e-6)
         return loss.mean()
 
-    def loss_comparable(self, index, target):
+    def loss_comparable(self, index, ray_id, target):
         # index: N, num_parts
         num_part = []
+        target = target[ray_id]
         positive = target == 1
         index = torch.max(index, dim=-1)[1]
         index = index[positive]
-        for i in range(index):
+        for i in range(self.num_parts):
             temp = index == i
-            if temp.sum() > 0:
-                num_part.append(temp.sum())
-            else:
-                num_part.append(torch.Tensor([0.], device=index.device))
-        num_part = torch.cat(num_part, dim=0)
+            # if temp.sum() > 0:
+            num_part.append(temp.sum())
+            # else:
+            #     num_part.append(torch.Tensor(0., device=index.device))
+        num_part = torch.stack(num_part, dim=0).float()
         loss = F.l1_loss(num_part, num_part.mean(dim=0, keepdim=True).repeat(num_part.shape[0]))
         return loss
 
     def loss_entropy(self, index):
         index = F.softmax(index, dim=-1)
-        # loss = 0.
-        # for i in range(index.shape[0]):
-        #     w1 = index[i]
         loss = cate.Categorical(probs=index).entropy() / math.log(index.shape[1])
         return loss.mean()
+
+    def loss_part_cons(self, fea, index):
+
+        return
 
     @torch.no_grad()
     def get_training_rays_in_maskcache_sampling(self, rgb_tr_ori, train_poses, HW, Ks, ndc, inverse_y,
@@ -417,15 +428,19 @@ class NeRF(nn.Module):
         xyz_emb = (rays_xyz.unsqueeze(-1) * self.viewfreq).flatten(-2)
         xyz_emb = torch.cat([rays_xyz, xyz_emb.sin(), xyz_emb.cos()], -1)
         part_fea = self.part_mlp(self.part_embeddings.weight)
-        index_pred = self.index_mlp(xyz_emb.unsqueeze(1), part_fea[None, ::].repeat(batch, 1, 1)).squeeze(1)
-        index_value = index_pred[:, -1]
-        index_pred = index_pred[:, :-1]
-        ind_uniques = torch.unique(ray_id)
-        index_value_pred = torch.zeros(len(ind_uniques), device=index_pred.device) # N,
-        for i, idx in enumerate(ind_uniques):
-            id_temp = ray_id == idx
-            index_value_temp = index_value[id_temp]
-            index_value_pred[i] = index_value_temp.max()
+        # index_pred = self.index_mlp(xyz_emb.unsqueeze(1), part_fea[None, ::].repeat(batch, 1, 1)).squeeze(1)
+        index_pred = [self.index_mlp(in1, in2) for in1, in2 in zip(xyz_emb.unsqueeze(1).split(8192, 0), \
+                                                       part_fea[None, ::].repeat(batch, 1, 1).split(8192, 0)
+                                                    )]
+        index_pred = torch.cat(index_pred, dim=0).squeeze(1)
+        # index_value = index_pred[:, -1]
+        # index_pred = index_pred[:, :-1]
+        # ind_uniques = torch.unique(ray_id)
+        # index_value_pred = torch.zeros(len(ind_uniques), device=index_pred.device) # N,
+        # for i, idx in enumerate(ind_uniques):
+        #     id_temp = ray_id == idx
+        #     index_value_temp = index_value[id_temp]
+        #     index_value_pred[i] = index_value_temp.max()
         index_mlp = torch.max(index_pred, dim=-1)[1]
 
         if self.rgbnets is None:
@@ -441,7 +456,11 @@ class NeRF(nn.Module):
             viewdirs_emb = (viewdirs.unsqueeze(-1) * self.viewfreq).flatten(-2)
             viewdirs_emb = torch.cat([viewdirs, viewdirs_emb.sin(), viewdirs_emb.cos()], -1)
             viewdirs_emb = viewdirs_emb.flatten(0, -2)[ray_id]
-            rgb_feat = torch.cat([k0_view, viewdirs_emb, part_fea], -1)
+            k0_view = torch.cat([k0_view, viewdirs_emb], -1)
+            rgb_feat = [self.feat_mlp(in1, in2) for in1, in2 in zip(k0_view.unsqueeze(1).split(8192, 0), \
+                                                       part_fea[None, ::].repeat(batch, 1, 1).split(8192, 0)
+                                                    )]
+            rgb_feat = torch.cat(rgb_feat, dim=0).squeeze(1)
             rgb_logit = torch.zeros(rgb_feat.shape[0], 3, device=rgb_feat.device) - 100
             for part in range(self.num_parts):
                 part_ind = index_mlp == part
@@ -466,7 +485,7 @@ class NeRF(nn.Module):
             'raw_alpha': alpha,
             'raw_rgb': rgb,
             'ray_id': ray_id,
-            'index_value': index_value_pred,
+            # 'index_value': index_value_pred,
             'index': index_pred,
         })
         if render_kwargs.get('render_mask', False):
@@ -475,7 +494,7 @@ class NeRF(nn.Module):
                 index=ray_id,
                 out=torch.zeros([N], device=weights.device),
                 reduce='sum')
-            ret_dict.update({'mask': mask_marched})
+            ret_dict.update({'mask_marched': mask_marched})
         if render_kwargs.get('render_depth', False):
             with torch.no_grad():
                 depth = segment_coo(
@@ -530,6 +549,51 @@ class CrossAttLayer(nn.Module):
         x = self.norm2(x)
         return x
 
+class LinearAttention(nn.Module):
+    def __init__(self, dim, heads = 4, ffn_dim_mul=2, drop=0.):
+        super().__init__()
+        self.dim_head = dim // heads
+        self.scale = self.dim_head ** -0.5
+        self.heads = heads
+        # hidden_dim = dim_head * heads
+        ffn_dim = ffn_dim_mul * dim
+        self.softmax = nn.Softmax(dim=-1)
+        self.q_lin = nn.Linear(dim, dim)
+        self.k_lin = nn.Linear(dim, dim)
+        self.v_lin = nn.Linear(dim, dim)
+        self.concat_lin = nn.Linear(dim, dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, ffn_dim),
+            nn.ReLU(),
+            nn.Linear(ffn_dim, dim)
+        )
+        self.dropout = nn.Dropout(drop)
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+
+    def forward(self, x, part_fea):
+        b, l, c = x.shape
+        l2 = part_fea.shape[1]
+        q = self.q_lin(x)
+        k = self.k_lin(part_fea)
+        v = self.v_lin(part_fea)
+        q = q.view(b, l, self.heads, self.dim_head).transpose(1, 2)  # b, head, l, dim_head
+        k = k.view(b, l2, self.heads, self.dim_head).transpose(1, 2)
+        v = v.view(b, l2, self.heads, self.dim_head).transpose(1, 2)
+        # q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h = self.heads), qkv)
+
+        q = q.softmax(dim = -1)
+        k = k.softmax(dim = -2)
+
+        q = q * self.scale
+        v = v / l2
+
+        context = torch.einsum('b h n d, b h e d -> b h n e', k, v)
+
+        out = torch.einsum('b h n e, b h n d -> b h e d', context, q)
+        out = rearrange(out, 'b h c (x y) -> b (h c) x y', h = self.heads, x = h, y = w)
+        return self.to_out(out)
+
 class IndexMLP(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_dim=128, part_dim=128, n_layers=3):
         super(IndexMLP, self).__init__()
@@ -548,3 +612,23 @@ class IndexMLP(nn.Module):
             x = hidden_layer(x, part_fea)
         x = self.out_layer(self.act(x))
         return x
+
+class RelateMLP(nn.Module):
+    def __init__(self, in_dim, out_dim, hidden_dim=128, part_dim=128, n_layers=3):
+        super(RelateMLP, self).__init__()
+        self.in_layer = nn.Linear(in_dim, hidden_dim)
+        self.in_layer_part = nn.Linear(part_dim, hidden_dim)
+        self.hidden_layers = nn.ModuleList()
+        for _ in range(n_layers - 2):
+            self.hidden_layers.append(CrossAttLayer(hidden_dim))
+        self.act = nn.ReLU()
+        self.out_layer = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, x, part_fea):
+        x = self.in_layer(x)
+        part_fea = self.in_layer_part(part_fea)
+        for hidden_layer in self.hidden_layers:
+            x = hidden_layer(x, part_fea)
+        x = self.out_layer(self.act(x))
+        return x
+

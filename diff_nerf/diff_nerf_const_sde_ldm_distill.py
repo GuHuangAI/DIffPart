@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
+import pdb
 import math
 import torch.nn.functional as F
 import os
-from diff_nerf.utils import default, identity, normalize_to_neg_one_to_one, unnormalize_to_zero_to_one
+from denoising_diffusion_pytorch.utils import default, identity, normalize_to_neg_one_to_one, unnormalize_to_zero_to_one
 from tqdm.auto import tqdm
 from einops import rearrange, reduce
 from functools import partial
@@ -583,11 +584,6 @@ class DDPM(nn.Module):
             out=torch.zeros([N, 3], device=weights.device),
             reduce='sum')
         rgb_marched += (alphainv_last.unsqueeze(-1) * render_kwargs['bg'])
-        mask_marched = segment_coo(
-                    src=(weights),
-                    index=ray_id,
-                    out=torch.zeros([N], device=weights.device),
-                    reduce='sum')
         ret_dict.update({
             'alphainv_last': alphainv_last,
             'weights': weights,
@@ -595,7 +591,6 @@ class DDPM(nn.Module):
             'raw_alpha': alpha,
             'raw_rgb': rgb,
             'ray_id': ray_id,
-            'mask_marched': mask_marched,
         })
 
         if render_kwargs.get('render_depth', False):
@@ -718,7 +713,8 @@ class LatentDiffusion(DDPM):
             self.init_from_ckpt(ckpt_path, ignore_keys, only_model)
 
     def init_first_stage(self, first_stage_model):
-        self.first_stage_model = first_stage_model.eval()
+        self.first_stage_model = first_stage_model
+        # self.first_stage_model = first_stage_model.eval()
         # self.first_stage_model.train = disabled_train
         for param in self.first_stage_model.parameters():
             param.requires_grad = False
@@ -753,6 +749,8 @@ class LatentDiffusion(DDPM):
             from diff_nerf.encoder_decoder_3d_4 import DiagonalGaussianDistribution
         elif self.cfg.first_stage.type == 'ae3d_5':
             from diff_nerf.encoder_decoder_3d_5 import DiagonalGaussianDistribution
+        elif self.cfg.first_stage.type == 'ae3d_10':
+            from diff_nerf.encoder_decoder_3d_10 import DiagonalGaussianDistribution
         elif self.cfg.first_stage.type == 'ae3d_11':
             from diff_nerf.encoder_decoder_3d_11 import DiagonalGaussianDistribution
         else:
@@ -887,6 +885,7 @@ class LatentDiffusion(DDPM):
         loss = loss_simple + loss_vlb
         with torch.no_grad():
             x_rec_dec = self.first_stage_model.decode(x_rec / self.scale_factor)
+        SpecifyGradient2.apply(x_rec, x_rec_dec)
         class_id = batch["class_id"]
         if self.cfg.first_stage.use_cls_loss and global_step >= self.cfg.first_stage.get('cls_start', 0):
             grad_cls, cls_loss_item, acc = self.class_loss(x_rec_dec, class_id, loss_weight=rec_weight)
@@ -896,9 +895,9 @@ class LatentDiffusion(DDPM):
 
         if self.cfg.first_stage.use_render_loss and global_step >= self.cfg.first_stage.render_start:
             render_kwargs = batch["render_kwargs"]
-            grad_render, loss_render_item, psnr = self.render_loss(x_rec_dec * self.first_stage_model.std_scale,
+            loss_render, loss_render_item, psnr = self.render_loss(x_rec_dec * self.first_stage_model.std_scale,
                                 render_kwargs, class_id=class_id, loss_weight=rec_weight)
-            loss_render = SpecifyGradient.apply(x_rec, grad_render)
+            # loss_render = SpecifyGradient.apply(x_rec, loss_render)
             loss += loss_render.mean()
             loss_dict.update({f'loss_render': loss_render_item, f'psnr': psnr})
         loss_dict.update({f'{prefix}/loss': loss})
@@ -947,11 +946,11 @@ class LatentDiffusion(DDPM):
             #     rgb_tr_ori=rgb_tr_ori,
             #     train_poses=poses,
             #     HW=HW, Ks=Ks,
-            #     ndc=False, inverse_y=False,
-            #     flip_x=False, flip_y=False,
+            #     ndc=False, inverse_y=render_kwarg_train['inverse_y'],
+            #     flip_x=render_kwarg_train['flip_x'], flip_y=render_kwarg_train['flip_y'],
             #     density=dens,
             #     render_kwargs=render_kwarg_train)
-            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.get_training_rays_flatten(
+            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.first_stage_model.get_training_rays_flatten(
                 rgb_tr_ori=rgb_tr_ori,
                 train_poses=poses,
                 HW=HW, Ks=Ks,
@@ -1046,8 +1045,11 @@ class LatentDiffusion(DDPM):
 
         #### model ####
         reconstructions = self.sample(batch_size=input.shape[0], up_scale=1, cond=cond, mask=mask, device=device)
-        cls_logits = self.first_stage_model.classifier(reconstructions)
-        cls_ids = torch.max(cls_logits, 1)[1]
+        try:
+            cls_logits = self.first_stage_model.classifier(reconstructions)
+            cls_ids = torch.max(cls_logits, 1)[1]
+        except:
+            cls_ids = None
         reconstructions = reconstructions * self.first_stage_model.std_scale
 
         if rotate_flag:
@@ -1065,8 +1067,8 @@ class LatentDiffusion(DDPM):
             fea = reconstructions[idx_obj][1:]
             # fea = fea + self.first_stage_model.residual(fea.unsqueeze(0))[0]
             render_pose = render_poses[idx_obj]
-
-            render_kwargs['class_id'] = cls_ids[idx_obj].item()
+            if cls_ids is not None:
+                render_kwargs['class_id'] = cls_ids[idx_obj].item()
             for i, c2w in enumerate(render_pose):
                 # H, W = HW[i]
                 # K = Ks[i]
@@ -1105,6 +1107,93 @@ class LatentDiffusion(DDPM):
         # del model
         torch.cuda.empty_cache()
         return rgbs, depths, bgmaps
+
+    @torch.no_grad()
+    def render_img_sample(self, batch_size, render_kwargs):
+        device = self.first_stage_model.scale_factor.device
+        H, W, focal = render_kwargs.hwf
+        K = np.array([
+            [focal, 0, 0.5 * W],
+            [0, focal, 0.5 * H],
+            [0, 0, 1]
+        ])
+
+        render_pose = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180, 180, 10)[:-1]],
+                                  0)
+        render_poses = [render_pose for _ in range(batch_size)]
+        # Ks = render_kwargs['Ks']
+        ndc = render_kwargs.ndc
+        render_factor = render_kwargs.render_factor
+        if render_factor != 0:
+            # HW = np.copy(HW)
+            # Ks = np.copy(Ks)
+            H = (H / render_factor).astype(int)
+            W = (W / render_factor).astype(int)
+            K[:2, :3] /= render_factor
+
+        #### model ####
+        reconstructions = self.sample(batch_size=batch_size, up_scale=1, cond=None, mask=None, device=device)
+        try:
+            cls_logits = self.first_stage_model.classifier(reconstructions)
+            cls_ids = torch.max(cls_logits, 1)[1]
+        except:
+            cls_ids = None
+        reconstructions = reconstructions * self.first_stage_model.std_scale
+
+        # reconstructions = input
+        rgbss = []
+        depthss = []
+        bgmapss = []
+        for idx_obj in range(reconstructions.shape[0]):
+
+            rgbs = []
+            depths = []
+            bgmaps = []
+            dens = reconstructions[idx_obj][0]
+            fea = reconstructions[idx_obj][1:]
+            # fea = fea + self.first_stage_model.residual(fea.unsqueeze(0))[0]
+            render_pose = render_poses[idx_obj]
+            if cls_ids is not None:
+                render_kwargs['class_id'] = cls_ids[idx_obj].item()
+            for i, c2w in enumerate(render_pose):
+                # H, W = HW[i]
+                # K = Ks[i]
+                # H, W = HW
+                # K = Ks
+                c2w = torch.Tensor(c2w)
+                rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
+                    H, W, K, c2w, ndc, inverse_y=render_kwargs.inverse_y,
+                    flip_x=render_kwargs.flip_x, flip_y=render_kwargs.flip_y)
+                keys = ['rgb_marched', 'depth', 'alphainv_last']
+                rays_o = rays_o.flatten(0, -2).to(device)
+                rays_d = rays_d.flatten(0, -2).to(device)
+                viewdirs = viewdirs.flatten(0, -2).to(device)
+                render_result_chunks = [
+                    {k: v for k, v in
+                     self.first_stage_model.render_train(dens, fea, ro, rd, vd, **render_kwargs).items() if k in keys}
+                    for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
+                ]
+                render_result = {
+                    k: torch.cat([ret[k] for ret in render_result_chunks]).reshape(H, W, -1)
+                    for k in render_result_chunks[0].keys()
+                }
+
+                if render_kwargs.render_depth:
+                    depth = render_result['depth'].permute(2, 0, 1)
+                    depths.append(depth)
+                rgb = render_result['rgb_marched'].permute(2, 0, 1)
+                bgmap = render_result['alphainv_last'].permute(2, 0, 1)
+                rgbs.append(rgb)
+                bgmaps.append(bgmap)
+            rgbss.append(rgbs)
+            depthss.append(depths)
+            bgmapss.append(bgmaps)
+        # rgbs = np.array(rgbs)
+        # depths = np.array(depths)
+        # bgmaps = np.array(bgmaps)
+        # del model
+        torch.cuda.empty_cache()
+        return rgbss, depthss, bgmapss
 
     @torch.no_grad()
     def sample(self, batch_size=16, up_scale=1, cond=None, mask=None, denoise=True, device=None):
@@ -1194,4 +1283,21 @@ class SpecifyGradient(torch.autograd.Function):
     def backward(ctx, grad_scale):
         (gt_grad,) = ctx.saved_tensors
         gt_grad = gt_grad * grad_scale
+        return gt_grad, None
+
+class SpecifyGradient2(torch.autograd.Function):
+    @staticmethod
+    @custom_fwd
+    def forward(ctx, input_tensor, out_tensor):
+        ctx.save_for_backward(out_tensor)
+        # we return a dummy value 1, which will be scaled by amp's scaler so we get the scale in backward.
+        return torch.ones(input_tensor.shape, device=input_tensor.device, dtype=input_tensor.dtype)
+        # return out_tensor
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, grad_scale):
+        (gt_grad,) = ctx.saved_tensors
+        # pdb.set_trace()
+        gt_grad = grad_scale
         return gt_grad, None

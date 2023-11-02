@@ -1278,7 +1278,7 @@ class AutoencoderKL(nn.Module):
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
 
-    def init_from_ckpt(self, path, ignore_keys=list(), use_ema=True):
+    def init_from_ckpt(self, path, ignore_keys=list(), use_ema=False):
         sd = torch.load(path, map_location="cpu")
         sd_keys = sd.keys()
         if 'ema' in list(sd.keys()) and use_ema:

@@ -150,15 +150,17 @@ def main(args):
                         datatmp[key] = datatmp[key].to(trainer.accelerator.device)
                         # print(trainer.accelerator.device)
                 if isinstance(trainer.model, nn.parallel.DistributedDataParallel):
-                    rgbs, depths, bgmaps = trainer.model.module.render_img(datatmp, nerf_cfg)
+                    rgbss, depthss, bgmapss = trainer.model.module.render_img_sample(2, nerf_cfg)
                 elif isinstance(trainer.model, nn.Module):
-                    rgbs, depths, bgmaps = trainer.model.render_img(datatmp, nerf_cfg)
+                    rgbss, depthss, bgmapss = trainer.model.render_img_sample(2, nerf_cfg)
                 # all_images = torch.clamp((all_images + 1.0) / 2.0, min=0.0, max=1.0)
 
             # all_images = torch.cat(all_images_list, dim = 0)
-            for rgb_i in range(len(rgbs)):
-                tv.utils.save_image(torch.from_numpy(rgbs[rgb_i]).permute(2, 0, 1),
-                                    str(trainer.results_folder / f'ckpt-{train_cfg.resume_milestone}-testbefore-{rgb_i}.png'))
+            for j in range(rgbss.shape[0]):
+                rgbs = rgbss[j]
+                for rgb_i in range(rgbs.shape[0]):
+                    tv.utils.save_image(torch.from_numpy(rgbs[rgb_i]).permute(2, 0, 1),
+                        str(trainer.results_folder / f'ckpt-{train_cfg.resume_milestone}-testbefore-{j}-image-{rgb_i}.png'))
             # nrow = 2 ** math.floor(math.log2(math.sqrt(data_cfg.batch_size)))
             # tv.utils.save_image(all_images, str(trainer.results_folder / f'sample-{train_cfg.resume_milestone}_{model_cfg.sampling_timesteps}.png'), nrow=nrow)
             torch.cuda.empty_cache()
@@ -322,11 +324,11 @@ class Trainer(object):
                     for key in batch.keys():
                         if isinstance(batch[key], torch.Tensor):
                             batch[key].to(device)
-                    if self.step == 0 and ga_ind == 0:
-                        if isinstance(self.model, nn.parallel.DistributedDataParallel):
-                            self.model.module.on_train_batch_start(batch)
-                        else:
-                            self.model.on_train_batch_start(batch)
+                    # if self.step == 0 and ga_ind == 0:
+                    #     if isinstance(self.model, nn.parallel.DistributedDataParallel):
+                    #         self.model.module.on_train_batch_start(batch)
+                    #     else:
+                    #         self.model.on_train_batch_start(batch)
 
                     with self.accelerator.autocast():
                         if isinstance(self.model, nn.parallel.DistributedDataParallel):
@@ -438,12 +440,14 @@ class Trainer(object):
                         self.save(milestone)
                         with torch.no_grad():
                             if isinstance(self.model, nn.parallel.DistributedDataParallel):
-                                rgbs, depths, bgmaps = self.model.module.render_img(batch, self.cfg.model.first_stage.render_kwargs)
+                                rgbss, depthss, bgmapss = self.model.module.render_img_sample(2, self.cfg.model.first_stage.render_kwargs)
                             else:
-                                rgbs, depths, bgmaps = self.model.render_img(batch, self.cfg.model.first_stage.render_kwargs)
-                            for rgb_i in range(len(rgbs)):
-                                tv.utils.save_image(torch.from_numpy(rgbs[rgb_i]).permute(2, 0, 1),
-                                                    str(self.results_folder / f'ckpt-{milestone}-sample-{rgb_i}.png'))
+                                rgbss, depthss, bgmapss = self.model.render_img_sample(2, self.cfg.model.first_stage.render_kwargs)
+                            for j in range(rgbss.shape[0]):
+                                rgbs = rgbss[j]
+                                for rgb_i in range(rgbs.shape[0]):
+                                    tv.utils.save_image(torch.from_numpy(rgbs[rgb_i]),
+                                                    str(self.results_folder / f'ckpt-{milestone}-sample-{j}-img-{rgb_i}.png'))
                         self.model.train()
                 accelerator.wait_for_everyone()
                 pbar.update(1)
