@@ -126,7 +126,7 @@ trainer:
   train_num_steps: 200000
   save_and_sample_every: 10000
   log_freq: 500
-  results_folder: '/data/huang/diff_nerf/result_ddm_const_64x64x64_ae3d10_bed'
+  results_folder: '/data/huang/diff_nerf/result_uncond_const_sde_64x64x64_ae3d10_bed'
   amp: False
   fp16: False
   test_before: True
