@@ -90,7 +90,7 @@ model:
     class_name: diff_nerf.uncond_3dunet_sb.Unet3D
     dim: 96
     dim_mults: [1, 2, 4]
-    in_channels: 5
+    channels: 5
     resnet_block_groups: 6
     heads: 4
     learned_sinusoidal_dim: 16
