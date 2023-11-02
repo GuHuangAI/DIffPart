@@ -4,7 +4,7 @@ import pdb
 import math
 import torch.nn.functional as F
 import os
-from denoising_diffusion_pytorch.utils import default, identity, normalize_to_neg_one_to_one, unnormalize_to_zero_to_one
+from diff_nerf.utils import default, identity, normalize_to_neg_one_to_one, unnormalize_to_zero_to_one
 from tqdm.auto import tqdm
 from einops import rearrange, reduce
 from functools import partial
