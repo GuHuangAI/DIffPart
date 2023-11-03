@@ -742,27 +742,28 @@ class LatentDiffusion(DDPM):
             print(f"Unexpected Keys: {unexpected}")
 
     def get_first_stage_encoding(self, encoder_posterior):
-        if self.cfg.first_stage.type == 'ae3d_2':
-            from diff_nerf.encoder_decoder_3d_2 import DiagonalGaussianDistribution
-        elif self.cfg.first_stage.type == 'ae3d_3':
-            from diff_nerf.encoder_decoder_3d_3 import DiagonalGaussianDistribution
-        elif self.cfg.first_stage.type == 'ae3d_4':
-            from diff_nerf.encoder_decoder_3d_4 import DiagonalGaussianDistribution
-        elif self.cfg.first_stage.type == 'ae3d_5':
-            from diff_nerf.encoder_decoder_3d_5 import DiagonalGaussianDistribution
-        elif self.cfg.first_stage.type == 'ae3d_10':
-            from diff_nerf.encoder_decoder_3d_10 import DiagonalGaussianDistribution
-        elif self.cfg.first_stage.type == 'ae3d_11':
-            from diff_nerf.encoder_decoder_3d_11 import DiagonalGaussianDistribution
-        else:
-            raise NotImplementedError
-        if isinstance(encoder_posterior, DiagonalGaussianDistribution):
-            z = encoder_posterior.sample()
-        elif isinstance(encoder_posterior, torch.Tensor):
-            z = encoder_posterior
-        else:
-            raise NotImplementedError(f"encoder_posterior of type '{type(encoder_posterior)}' not yet implemented")
+        # if self.cfg.first_stage.type == 'ae3d_2':
+        #     from diff_nerf.encoder_decoder_3d_2 import DiagonalGaussianDistribution
+        # elif self.cfg.first_stage.type == 'ae3d_3':
+        #     from diff_nerf.encoder_decoder_3d_3 import DiagonalGaussianDistribution
+        # elif self.cfg.first_stage.type == 'ae3d_4':
+        #     from diff_nerf.encoder_decoder_3d_4 import DiagonalGaussianDistribution
+        # elif self.cfg.first_stage.type == 'ae3d_5':
+        #     from diff_nerf.encoder_decoder_3d_5 import DiagonalGaussianDistribution
+        # elif self.cfg.first_stage.type == 'ae3d_10':
+        #     from diff_nerf.encoder_decoder_3d_10 import DiagonalGaussianDistribution
+        # elif self.cfg.first_stage.type == 'ae3d_11':
+        #     from diff_nerf.encoder_decoder_3d_11 import DiagonalGaussianDistribution
+        # else:
+        #     raise NotImplementedError
+        # if isinstance(encoder_posterior, DiagonalGaussianDistribution):
+        #     z = encoder_posterior.sample()
+        # elif isinstance(encoder_posterior, torch.Tensor):
+        #     z = encoder_posterior
+        # else:
+        #     raise NotImplementedError(f"encoder_posterior of type '{type(encoder_posterior)}' not yet implemented")
         # return self.scale_factor * z.detach() + self.scale_bias
+        z = encoder_posterior.sample()
         return z.detach()
 
     @torch.no_grad()

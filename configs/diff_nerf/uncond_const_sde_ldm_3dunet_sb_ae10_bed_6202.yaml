@@ -21,6 +21,7 @@ model:
   weighting_loss: True
   first_stage:
     class_name: diff_nerf.encoder_decoder_3d_10.AutoencoderKL
+    type:
     embed_dim: 5
     std_scale: 4
     use_render_loss: True
