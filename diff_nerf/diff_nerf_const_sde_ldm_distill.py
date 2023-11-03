@@ -67,11 +67,12 @@ class DDPM(nn.Module):
         use_l1=False,
         **kwargs
     ):
+        super().__init__()
         ckpt_path = kwargs.pop("ckpt_path", None)
         ignore_keys = kwargs.pop("ignore_keys", [])
         only_model = kwargs.pop("only_model", False)
         cfg = kwargs.pop("cfg", None)
-        super().__init__(**kwargs)
+        # super().__init__(**kwargs)
         self.model = model
         self.channels = self.model.channels
         self.self_condition = self.model.self_condition
