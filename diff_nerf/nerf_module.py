@@ -60,8 +60,9 @@ class NeRF(nn.Module):
         self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
         nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
         self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
-        dim_index = 3 + 3 * viewbase_pe * 2
-        self.index_mlp = IndexMLP(in_dim=dim_index, out_dim=self.num_parts, part_dim=self.part_fea_dim)
+        # dim_index = 3 + 3 * viewbase_pe * 2
+        self.index_mlp = IndexMLP(in_dim=self.cfg.dvgo.rgbnet_dim, out_dim=self.num_parts, part_dim=self.part_fea_dim,
+                                  hidden_dim=self.part_fea_dim)
 
         # dim0 += self.part_fea_dim
         self.feat_mlp = RelateMLP(in_dim=dim0, out_dim=self.part_fea_dim, part_dim=self.part_fea_dim)
@@ -85,6 +86,7 @@ class NeRF(nn.Module):
     def render_loss(self, field, render_kwargs, **kwargs):
         # field =
         # assert len(render_kwargs) == len(field);
+        global_step = kwargs.get('global_step', 0)
         HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss = [
             render_kwargs[k] for k in [
                 'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'images', 'masks'
@@ -117,7 +119,7 @@ class NeRF(nn.Module):
                 'render_depth': self.cfg.render_depth
             }
             # loss = 0.
-            if self.cfg.get('in_maskcache_sampling', True):
+            if global_step >= self.cfg.get('maskcache_sampling_step'):
                 rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, mask_tr = self.get_training_rays_in_maskcache_sampling(
                     rgb_tr_ori=rgb_tr_ori,
                     masks=masks,
@@ -424,12 +426,13 @@ class NeRF(nn.Module):
         # query for color
         batch = ray_pts.shape[0]
         k0 = self.forward_grid(fea, ray_pts)
-        rays_xyz = (ray_pts - self.xyz_min) / (self.xyz_max - self.xyz_min)
-        xyz_emb = (rays_xyz.unsqueeze(-1) * self.viewfreq).flatten(-2)
-        xyz_emb = torch.cat([rays_xyz, xyz_emb.sin(), xyz_emb.cos()], -1)
+        # rays_xyz = (ray_pts - self.xyz_min) / (self.xyz_max - self.xyz_min)
+        # xyz_emb = (rays_xyz.unsqueeze(-1) * self.viewfreq).flatten(-2)
+        # xyz_emb = torch.cat([rays_xyz, xyz_emb.sin(), xyz_emb.cos()], -1)
+
         part_fea = self.part_mlp(self.part_embeddings.weight)
         # index_pred = self.index_mlp(xyz_emb.unsqueeze(1), part_fea[None, ::].repeat(batch, 1, 1)).squeeze(1)
-        index_pred = [self.index_mlp(in1, in2) for in1, in2 in zip(xyz_emb.unsqueeze(1).split(8192, 0), \
+        index_pred = [self.index_mlp(in1, in2) for in1, in2 in zip(k0.unsqueeze(1).split(8192, 0), \
                                                        part_fea[None, ::].repeat(batch, 1, 1).split(8192, 0)
                                                     )]
         index_pred = torch.cat(index_pred, dim=0).squeeze(1)
@@ -507,18 +510,19 @@ class NeRF(nn.Module):
         return ret_dict
 
 class CrossAttLayer(nn.Module):
-    def __init__(self, dim, heads=4, ffn_dim_mul=2, drop=0.):
+    def __init__(self, dim, heads=4, reduce=4, ffn_dim_mul=2, drop=0.):
         super().__init__()
         self.dim_head = dim // heads
         self.scale = self.dim_head ** -0.5
         self.heads = heads
+        self.reduce = reduce
         # hidden_dim = dim_head * heads
         ffn_dim = ffn_dim_mul * dim
         self.softmax = nn.Softmax(dim=-1)
-        self.q_lin = nn.Linear(dim, dim)
-        self.k_lin = nn.Linear(dim, dim)
+        self.q_lin = nn.Linear(dim, dim//reduce)
+        self.k_lin = nn.Linear(dim, dim//reduce)
         self.v_lin = nn.Linear(dim, dim)
-        self.concat_lin = nn.Linear(dim, dim)
+        # self.concat_lin = nn.Linear(dim, dim)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim),
             nn.ReLU(),
@@ -534,8 +538,8 @@ class CrossAttLayer(nn.Module):
         q = self.q_lin(x)
         k = self.k_lin(part_fea)
         v = self.v_lin(part_fea)
-        q = q.view(b, l, self.heads, self.dim_head).transpose(1, 2)  # b, head, l, dim_head
-        k = k.view(b, l2, self.heads, self.dim_head).transpose(1, 2)
+        q = q.view(b, l, self.heads, self.dim_head//self.reduce).transpose(1, 2)  # b, head, l, dim_head
+        k = k.view(b, l2, self.heads, self.dim_head//self.reduce).transpose(1, 2)
         v = v.view(b, l2, self.heads, self.dim_head).transpose(1, 2)
 
         q = q * self.scale
@@ -543,56 +547,14 @@ class CrossAttLayer(nn.Module):
         att = self.softmax(q @ k_t)
         v = att @ v  # b, head, l ,dim_head
         v = v.transpose(1, 2).contiguous().view(b, l, c)
-        x = x + self.concat_lin(v)
+        # x = x + self.concat_lin(v)
+        x = x + v
         x = self.norm1(x)
         x = x + self.dropout(self.ffn(x))
         x = self.norm2(x)
         return x
 
-class LinearAttention(nn.Module):
-    def __init__(self, dim, heads = 4, ffn_dim_mul=2, drop=0.):
-        super().__init__()
-        self.dim_head = dim // heads
-        self.scale = self.dim_head ** -0.5
-        self.heads = heads
-        # hidden_dim = dim_head * heads
-        ffn_dim = ffn_dim_mul * dim
-        self.softmax = nn.Softmax(dim=-1)
-        self.q_lin = nn.Linear(dim, dim)
-        self.k_lin = nn.Linear(dim, dim)
-        self.v_lin = nn.Linear(dim, dim)
-        self.concat_lin = nn.Linear(dim, dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, ffn_dim),
-            nn.ReLU(),
-            nn.Linear(ffn_dim, dim)
-        )
-        self.dropout = nn.Dropout(drop)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
 
-    def forward(self, x, part_fea):
-        b, l, c = x.shape
-        l2 = part_fea.shape[1]
-        q = self.q_lin(x)
-        k = self.k_lin(part_fea)
-        v = self.v_lin(part_fea)
-        q = q.view(b, l, self.heads, self.dim_head).transpose(1, 2)  # b, head, l, dim_head
-        k = k.view(b, l2, self.heads, self.dim_head).transpose(1, 2)
-        v = v.view(b, l2, self.heads, self.dim_head).transpose(1, 2)
-        # q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h = self.heads), qkv)
-
-        q = q.softmax(dim = -1)
-        k = k.softmax(dim = -2)
-
-        q = q * self.scale
-        v = v / l2
-
-        context = torch.einsum('b h n d, b h e d -> b h n e', k, v)
-
-        out = torch.einsum('b h n e, b h n d -> b h e d', context, q)
-        out = rearrange(out, 'b h c (x y) -> b (h c) x y', h = self.heads, x = h, y = w)
-        return self.to_out(out)
 
 class IndexMLP(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_dim=128, part_dim=128, n_layers=3):
