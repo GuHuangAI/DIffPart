@@ -40,8 +40,8 @@ model:
     render_depth: False
     render_mask: True
     rotate_flag: False
-    N_rand: 1024
-    inner_iter: 1
+    N_rand: 8192
+    inner_iter: 10
     weight_main: 3. # 1 default
     weight_entropy_last: 0.003 # 0.001 default
     weight_rgbper: 0.03 # 0.01 default
