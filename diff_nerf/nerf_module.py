@@ -171,7 +171,7 @@ class NeRF(nn.Module):
                 loss = loss * lw.item()
                 # loss_item += loss.detach().item()
                 # accelerator.backward(loss)
-        loss_item = loss.detach().item()
+        # loss_item = loss.detach().item()
         loss_dict = {
             'loss_render_main': loss_main.detach().item(),
             'psnr': psnr/bs/self.cfg.inner_iter,
