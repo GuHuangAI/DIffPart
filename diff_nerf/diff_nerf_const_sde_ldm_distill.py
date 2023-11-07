@@ -943,22 +943,23 @@ class LatentDiffusion(DDPM):
                 'flip_y': self.cfg.first_stage.render_kwargs.flip_y,
                 'class_id': cls_id
             }
-
-            # rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.first_stage_model.get_training_rays_in_maskcache_sampling(
-            #     rgb_tr_ori=rgb_tr_ori,
-            #     train_poses=poses,
-            #     HW=HW, Ks=Ks,
-            #     ndc=False, inverse_y=render_kwarg_train['inverse_y'],
-            #     flip_x=render_kwarg_train['flip_x'], flip_y=render_kwarg_train['flip_y'],
-            #     density=dens,
-            #     render_kwargs=render_kwarg_train)
-            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.first_stage_model.get_training_rays_flatten(
-                rgb_tr_ori=rgb_tr_ori,
-                train_poses=poses,
-                HW=HW, Ks=Ks,
-                ndc=False, inverse_y=render_kwarg_train['inverse_y'],
-                flip_x=render_kwarg_train['flip_x'], flip_y=render_kwarg_train['flip_y'],
-            )
+            if self.cfg.first_stage.render_kwargs.get('maskcache_sampling', False):
+                rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.first_stage_model.get_training_rays_in_maskcache_sampling(
+                    rgb_tr_ori=rgb_tr_ori,
+                    train_poses=poses,
+                    HW=HW, Ks=Ks,
+                    ndc=False, inverse_y=render_kwarg_train['inverse_y'],
+                    flip_x=render_kwarg_train['flip_x'], flip_y=render_kwarg_train['flip_y'],
+                    density=dens,
+                    render_kwargs=render_kwarg_train)
+            else:
+                rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.first_stage_model.get_training_rays_flatten(
+                    rgb_tr_ori=rgb_tr_ori,
+                    train_poses=poses,
+                    HW=HW, Ks=Ks,
+                    ndc=False, inverse_y=render_kwarg_train['inverse_y'],
+                    flip_x=render_kwarg_train['flip_x'], flip_y=render_kwarg_train['flip_y'],
+                )
             # render_kwarg.update()
             for iter in range(self.cfg.first_stage.render_kwargs.inner_iter):
                 sel_b = torch.randint(rgb_tr.shape[0], [self.cfg.first_stage.render_kwargs.N_rand])

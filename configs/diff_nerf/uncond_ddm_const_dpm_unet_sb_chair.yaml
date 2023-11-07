@@ -21,7 +21,7 @@ model:
   eps: !!float 1e-3
   weighting_loss: True
   use_render_loss: True
-  render_start: 0
+  render_start: 10000
   nerf:
     class_name: diff_nerf.nerf_module.NeRF
     num_parts: 4
@@ -40,7 +40,7 @@ model:
     render_depth: False
     render_mask: True
     rotate_flag: False
-    N_rand: 2048
+    N_rand: 1024
     inner_iter: 1
     weight_main: 3. # 1 default
     weight_entropy_last: 0.003 # 0.001 default
@@ -110,7 +110,7 @@ trainer:
   results_folder: '/media/huang/T7/data/diff_nerf/results_uncond_ddm_const_dpm_3dunet_sb_joint'
   amp: False
   fp16: False
-  test_before: False
+  test_before: True
   resume_milestone: current
   ema_update_after_step: 20000
   ema_update_every: 10

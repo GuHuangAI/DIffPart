@@ -284,11 +284,12 @@ class DDPM(nn.Module):
         loss = loss_simple + loss_vlb
         if self.use_render_loss and global_step >= self.cfg.get('render_start', 0):
             render_kwargs = batch["render_kwargs"]
-            loss_render, loss_render_item, psnr = self.nerf(x_rec * self.cfg.std_scale, render_kwargs, loss_weight=render_weight, global_step=global_step, **kwargs)
+            loss_render, loss_render_dict = self.nerf(x_rec * self.cfg.std_scale, render_kwargs, loss_weight=render_weight, global_step=global_step, **kwargs)
             # loss_render = self.render_loss(x_rec * self.std_scale, render_kwargs) * render_weight
             # loss_render = loss_render.mean()
-            loss_dict.update({f'loss_render': loss_render_item})
-            loss_dict.update({f'psnr': psnr})
+            # loss_dict.update({f'loss_render': loss_render_item})
+            # loss_dict.update({f'psnr': psnr})
+            loss_dict.update(loss_render_dict)
             loss += loss_render
         loss_dict.update({f'{prefix}/loss': loss})
         return loss, loss_dict

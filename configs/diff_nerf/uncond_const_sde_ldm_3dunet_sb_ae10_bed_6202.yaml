@@ -27,7 +27,7 @@ model:
     use_cls_loss: False
     cls_start: 10000
     cls_path: "/media/huang/T7/data/diff_nerf/classifier/best_model_res18_rotate_non_normalize"
-    render_start: 70000
+    render_start: 20000
     grid_size: [ 64, 32, 16 ]
     maxm: 191.3546
     minm: -258.9259
@@ -63,8 +63,9 @@ model:
       bg: 1
       render_depth: False
       rotate_flag: False
+      maskcache_sampling: True
       N_rand: 8192
-      inner_iter: 50
+      inner_iter: 10
       weight_main: 3. # 1 default
       weight_entropy_last: 0.003 # 0.001 default
       weight_rgbper: 0.03 # 0.01 default

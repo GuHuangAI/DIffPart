@@ -14,7 +14,8 @@ from diff_nerf.data import VolumeDataset, default_collate
 from torch.utils.data import DataLoader
 from multiprocessing import cpu_count
 from fvcore.common.config import CfgNode
-
+import warnings
+warnings.filterwarnings('ignore')
 
 def parse_args():
     parser = argparse.ArgumentParser(description="training vae configure")
@@ -156,10 +157,10 @@ def main(args):
                 # all_images = torch.clamp((all_images + 1.0) / 2.0, min=0.0, max=1.0)
 
             # all_images = torch.cat(all_images_list, dim = 0)
-            for j in range(rgbss.shape[0]):
+            for j in range(len(rgbss)):
                 rgbs = rgbss[j]
-                for rgb_i in range(rgbs.shape[0]):
-                    tv.utils.save_image(torch.from_numpy(rgbs[rgb_i]).permute(2, 0, 1),
+                for rgb_i in range(len(rgbs)):
+                    tv.utils.save_image(rgbs[rgb_i],
                         str(trainer.results_folder / f'ckpt-{train_cfg.resume_milestone}-testbefore-{j}-image-{rgb_i}.png'))
             # nrow = 2 ** math.floor(math.log2(math.sqrt(data_cfg.batch_size)))
             # tv.utils.save_image(all_images, str(trainer.results_folder / f'sample-{train_cfg.resume_milestone}_{model_cfg.sampling_timesteps}.png'), nrow=nrow)
@@ -232,7 +233,7 @@ class Trainer(object):
         self.opt_d = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.model.parameters()),
                                      lr=train_lr, weight_decay=cfg.trainer.get('train_wd', 1e-2))
         self.opt_v = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.nerf.parameters()),
-                                     lr=train_lr, weight_decay=cfg.trainer.get('train_wd', 1e-2))
+                                     lr=train_lr*10, weight_decay=cfg.trainer.get('train_wd', 1e-2))
         lr_lambda = lambda iter: max((1 - iter / train_num_steps) ** 0.95, cfg.trainer.min_lr)
         self.lr_scheduler_d = torch.optim.lr_scheduler.LambdaLR(self.opt_d, lr_lambda=lr_lambda)
         self.lr_scheduler_v = torch.optim.lr_scheduler.LambdaLR(self.opt_v, lr_lambda=lr_lambda)
@@ -440,13 +441,13 @@ class Trainer(object):
                         self.save(milestone)
                         with torch.no_grad():
                             if isinstance(self.model, nn.parallel.DistributedDataParallel):
-                                rgbss, depthss, bgmapss = self.model.module.render_img_sample(2, self.cfg.model.first_stage.render_kwargs)
+                                rgbss, depthss, bgmapss = self.model.module.render_img_sample(2, self.cfg.model.nerf)
                             else:
-                                rgbss, depthss, bgmapss = self.model.render_img_sample(2, self.cfg.model.first_stage.render_kwargs)
-                            for j in range(rgbss.shape[0]):
+                                rgbss, depthss, bgmapss = self.model.render_img_sample(2, self.cfg.model.nerf)
+                            for j in range(len(rgbss)):
                                 rgbs = rgbss[j]
-                                for rgb_i in range(rgbs.shape[0]):
-                                    tv.utils.save_image(torch.from_numpy(rgbs[rgb_i]),
+                                for rgb_i in range(len(rgbs)):
+                                    tv.utils.save_image(rgbs[rgb_i],
                                                     str(self.results_folder / f'ckpt-{milestone}-sample-{j}-img-{rgb_i}.png'))
                         self.model.train()
                 accelerator.wait_for_everyone()

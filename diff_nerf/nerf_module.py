@@ -172,7 +172,16 @@ class NeRF(nn.Module):
                 # loss_item += loss.detach().item()
                 # accelerator.backward(loss)
         loss_item = loss.detach().item()
-        return loss/bs/self.cfg.inner_iter, loss_item/bs/self.cfg.inner_iter, psnr/bs/self.cfg.inner_iter
+        loss_dict = {
+            'loss_render_main': loss_main.detach().item(),
+            'psnr': psnr/bs/self.cfg.inner_iter,
+            'loss_ind_entropy': loss_ind_entropy.detach().item(),
+        }
+        if mask_tr is not None:
+            loss_dict['loss_mask'] = loss_mask.detach().item()
+            loss_dict['loss_comparable'] = loss_comparable.detach().item()
+        #return loss/bs/self.cfg.inner_iter, loss_item/bs/self.cfg.inner_iter, psnr/bs/self.cfg.inner_iter
+        return loss / bs / self.cfg.inner_iter, loss_dict
 
     def loss_coverage(self, pred, target):
         positive = target == 1
