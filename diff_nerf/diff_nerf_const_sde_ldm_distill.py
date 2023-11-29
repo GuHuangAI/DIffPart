@@ -902,9 +902,23 @@ class LatentDiffusion(DDPM):
             # loss_render = SpecifyGradient.apply(x_rec, loss_render)
             loss += loss_render.mean()
             loss_dict.update({f'loss_render': loss_render_item, f'psnr': psnr})
+        if self.cfg.first_stage.render_kwargs.weight_tv > 0:
+            grid = x_rec_dec * self.first_stage_model.std_scale
+            loss_tv = self.total_variation(grid) * self.cfg.first_stage.render_kwargs.weight_tv
+            loss += loss_tv
         loss_dict.update({f'{prefix}/loss': loss})
-
         return loss, loss_dict
+
+    def total_variation(self, v, mask=None):
+        tv2 = v.diff(dim=-3).abs()
+        tv3 = v.diff(dim=-2).abs()
+        tv4 = v.diff(dim=-1).abs()
+        if mask is not None:
+            tv2 = tv2[mask[:, :, :-1] & mask[:, :, 1:]]
+            tv3 = tv3[mask[:, :, :, :-1] & mask[:, :, :, 1:]]
+            tv4 = tv4[mask[:, :, :, :, :-1] & mask[:, :, :, :, 1:]]
+        # return (tv2.mean() + tv3.mean() + tv4.mean()) / 3
+        return (tv2.sum() + tv3.sum() + tv4.sum()) / v.shape[-1]
 
     def render_loss(self, field, render_kwargs, **kwargs):
         # field =

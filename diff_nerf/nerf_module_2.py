@@ -17,6 +17,7 @@ render_utils_cuda = load(
         verbose=True)
 
 ####   DVGO NeRF  ####
+# Compared to nerf_module: add part attention
 class NeRF(nn.Module):
     def __init__(self, cfg, **kwargs):
         super(NeRF, self).__init__()
@@ -59,8 +60,8 @@ class NeRF(nn.Module):
         self.part_fea_dim = self.cfg.get('part_fea_dim', 128)
         self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
         nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
-        self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
-        # self.part_mlp = PartAtt(self.part_fea_dim, self.part_fea_dim, n_layers=4)
+        # self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
+        self.part_mlp = PartAtt(self.part_fea_dim, self.part_fea_dim, n_layers=4)
         # dim_index = 3 + 3 * viewbase_pe * 2
         self.index_mlp = IndexMLP(in_dim=self.cfg.dvgo.rgbnet_dim, out_dim=self.part_fea_dim+self.num_parts,
                                   part_dim=self.part_fea_dim, hidden_dim=self.part_fea_dim)
@@ -697,9 +698,10 @@ class PartAtt(nn.Module):
         for _ in range(n_layers - 1):
             self.hidden_layers.append(SelfAttLayer(out_dim, reduce=2))
 
-    def forward(self, x, part_fea):
+    def forward(self, x):
+        # x : num_parts, part_dim
+        x = x.unsqueeze(0)
         x = self.in_layer(x)
-        part_fea = self.in_layer_part(part_fea)
         for hidden_layer in self.hidden_layers:
-            x = hidden_layer(x, part_fea)
-        return x
+            x = hidden_layer(x)
+        return x[0]

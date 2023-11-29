@@ -1,4 +1,4 @@
-# ae, mlp optimizing independently
+# pytorch_diffusion + one mlp + multi-scale attention feature grid  + optimizing together + independent loss
 import math
 import time
 import torch
@@ -8,7 +8,9 @@ import numpy as np
 from einops import rearrange
 from diff_nerf.loss import LPIPSWithDiscriminator
 import os
+from diff_nerf.data import max_min_unnormalize
 from tqdm.auto import tqdm
+from train_cls_3d import generate_model
 from torch_scatter import segment_coo
 from diff_nerf import dvgo, grid
 from scipy import ndimage
@@ -19,6 +21,12 @@ render_utils_cuda = load(
         sources=[
             os.path.join(parent_dir, path)
             for path in ['cuda/render_utils.cpp', 'cuda/render_utils_kernel.cu']],
+        verbose=True)
+total_variation_cuda = load(
+        name='total_variation_cuda',
+        sources=[
+            os.path.join(parent_dir, path)
+            for path in ['cuda/total_variation.cpp', 'cuda/total_variation_kernel.cu']],
         verbose=True)
 
 trans_t = lambda t : torch.Tensor([
@@ -150,9 +158,10 @@ class MSWA_3D(nn.Module): # Multi-Scale Window-Attention
             self.avgpool_ks.append(nn.AdaptiveAvgPool3d(output_size=window_size_k[i]))
         self.softmax = nn.Softmax(dim=-1)
         self.mlp = Mlp(in_features=hidden_dim, hidden_features=hidden_dim*2, drop=drop)
+        num_g = 8 if hidden_dim > 8 else 2
         self.out_conv = nn.Sequential(
             nn.Conv3d(hidden_dim, hidden_dim, 1, groups=groups),
-            nn.GroupNorm(8, hidden_dim)
+            nn.GroupNorm(num_g, hidden_dim)
         )
 
     def forward(self, x):
@@ -1106,6 +1115,87 @@ class DiagonalGaussianDistribution(object):
     def mode(self):
         return self.mean
 
+class MultiScaleGrid(nn.Module):
+    def __init__(self, in_dim, embed_dim=4, grid_size=[64, 32, 16, 8],
+                        xyz_min=[-1, -1, -1], xyz_max = [1, 1, 1]):
+        super().__init__()
+        self.multi_embed = nn.ModuleList([])
+        scale_levels = len(grid_size)
+        for i in range(scale_levels):
+            self.multi_embed.append(nn.Sequential(
+                nn.Conv3d(in_dim, embed_dim, 3, 1, 1),
+            )
+                                    )
+        self.grid_size = grid_size
+        # self.xyz_min = torch.Tensor(xyz_min)
+        # self.xyz_max = torch.Tensor(xyz_max)
+        self.register_buffer('xyz_min', torch.Tensor(xyz_min))
+        self.register_buffer('xyz_max', torch.Tensor(xyz_max))
+
+    def forward(self, grid, xyz):
+        # grid: C, X, Y, Z             xyz: B, 3
+        channels = grid.shape[0]
+        grid = grid.unsqueeze(0)
+        shape = xyz.shape[:-1]
+        xyz = xyz.reshape(1, 1, 1, -1, 3)
+        ind_norm = ((xyz - self.xyz_min) / (self.xyz_max - self.xyz_min)).flip((-1,)) * 2 - 1
+        # print(ind_norm.shape)
+        tmp = F.grid_sample(grid, ind_norm, mode='bilinear', align_corners=True)
+        # print(out.shape)
+        tmp = tmp.reshape(channels, -1).T.reshape(*shape, channels)
+        out = [tmp]
+        for i, size in enumerate(self.grid_size):
+            xs = F.interpolate(grid, size=(size, size, size), mode='trilinear')
+            xs = self.multi_embed[i](xs)
+            tmp = F.grid_sample(xs, ind_norm, mode='bilinear', align_corners=True)
+            tmp = tmp.reshape(channels, -1).T.reshape(*shape, channels)
+            out.append(tmp)
+        return torch.cat(out, dim=-1)
+
+class MultiScaleAttentionGrid(nn.Module):
+    def __init__(self, in_dim, embed_dim=4, grid_size=[64, 32, 16, 8],
+                        xyz_min=[-1, -1, -1], xyz_max = [1, 1, 1]):
+        super().__init__()
+        # self.multi_embed = nn.ModuleList([])
+        scale_levels = len(grid_size)
+        # for i in range(scale_levels):
+        #     self.multi_embed.append(nn.Sequential(
+        #         nn.Conv3d(in_dim, embed_dim, 3, 1, 1),
+        #     )
+        #                             )
+        self.att = MSWA_3D(dim=in_dim, heads=1,
+                                    window_size_q=[8, 8, 8],
+                                    window_size_k=[[8, 8, 8], [4, 4, 4], [2, 2, 2]],
+                                    groups=1)
+        nn.init.normal_(self.att.out_conv[0].weight, 0, 0.001)
+        nn.init.constant_(self.att.out_conv[0].bias, 0)
+        self.grid_size = grid_size
+        # self.xyz_min = torch.Tensor(xyz_min)
+        # self.xyz_max = torch.Tensor(xyz_max)
+        self.register_buffer('xyz_min', torch.Tensor(xyz_min))
+        self.register_buffer('xyz_max', torch.Tensor(xyz_max))
+
+    def forward(self, grid, xyz):
+        # grid: C, X, Y, Z             xyz: B, 3
+        channels = grid.shape[0]
+        grid = grid.unsqueeze(0)
+        grid = self.att(grid)
+        shape = xyz.shape[:-1]
+        xyz = xyz.reshape(1, 1, 1, -1, 3)
+        ind_norm = ((xyz - self.xyz_min) / (self.xyz_max - self.xyz_min)).flip((-1,)) * 2 - 1
+        # print(ind_norm.shape)
+        tmp = F.grid_sample(grid, ind_norm, mode='bilinear', align_corners=True)
+        # print(out.shape)
+        tmp = tmp.reshape(channels, -1).T.reshape(*shape, channels)
+        out = [tmp]
+        for i, size in enumerate(self.grid_size):
+            xs = F.interpolate(grid, size=(size, size, size), mode='trilinear')
+            # xs = self.multi_embed[i](xs)
+            tmp = F.grid_sample(xs, ind_norm, mode='bilinear', align_corners=True)
+            tmp = tmp.reshape(channels, -1).T.reshape(*shape, channels)
+            out.append(tmp)
+        return torch.cat(out, dim=-1)
+
 class AutoencoderKL(nn.Module):
     def __init__(self,
                  ddconfig,
@@ -1116,10 +1206,11 @@ class AutoencoderKL(nn.Module):
                  image_key="image",
                  colorize_nlabels=None,
                  monitor=None,
+                 classes=10,
                  # rgbnet_dim=4,
                  # rgbnet_width=256,
                  # rgbnet_depth=8,
-                 cfg={},
+                 cfg={}, **kwargs,
                  ):
         super().__init__()
         self.image_key = image_key
@@ -1133,59 +1224,60 @@ class AutoencoderKL(nn.Module):
         self.embed_dim = embed_dim
         self.cfg = cfg
         self.std_scale = cfg.get('std_scale', 1.)
-        self.use_render_loss = cfg.get('use_render_loss', False)
-
-        # model kwargs #
-        self.register_buffer('xyz_min', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_min))
-        self.register_buffer('xyz_max', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_max))
-        self.fast_color_thres = self.cfg.render_kwargs.dvgo.fast_color_thres
-        self.mask_cache_thres = self.cfg.render_kwargs.dvgo.mask_cache_thres
-
-        # determine based grid resolution
-        self.num_voxels_base = self.cfg.render_kwargs.dvgo.num_voxels_base
-        self.voxel_size_base = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels_base).pow(1 / 3)
-
-        # determine the density bias shift
-        self.alpha_init = self.cfg.render_kwargs.dvgo.alpha_init
-        self.register_buffer('act_shift', torch.FloatTensor([np.log(1 / (1 - self.alpha_init) - 1)]))
-        self.act_shift -= 4
-        self.num_voxels = self.cfg.render_kwargs.dvgo.num_voxels
-        self.voxel_size = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels).pow(1 / 3)
-        self.world_size = ((self.xyz_max - self.xyz_min) / self.voxel_size).long()
-        self.voxel_size_ratio = self.voxel_size / self.voxel_size_base
-
-        if colorize_nlabels is not None:
-            assert type(colorize_nlabels)==int
-            self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
-        if monitor is not None:
-            self.monitor = monitor
-        viewbase_pe = self.cfg.render_kwargs.dvgo.viewbase_pe
-        self.register_buffer('viewfreq', torch.FloatTensor([(2 ** i) for i in range(viewbase_pe)]))
-        dim0 = (3 + 3 * viewbase_pe * 2)
-        if self.cfg.render_kwargs.dvgo.rgbnet_full_implicit:
-            pass
-        elif self.cfg.render_kwargs.dvgo.rgbnet_direct:
-            dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim
-        else:
-            dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim - 3
-        rgbnet_width = cfg.render_kwargs.dvgo.rgbnet_width
-        rgbnet_depth = cfg.render_kwargs.dvgo.rgbnet_depth
-        self.residual = nn.Conv3d(ddconfig['in_channels']-1, ddconfig['in_channels']-1, 3, 1, 1)
-        nn.init.normal_(self.residual.weight, 0, 0.001)
-        nn.init.constant_(self.residual.bias, 0)
-        self.rgbnet = nn.Sequential(
-            nn.Linear(dim0, rgbnet_width), nn.ReLU(inplace=True),
-            *[
-                nn.Sequential(nn.Linear(rgbnet_width, rgbnet_width), nn.ReLU(inplace=True))
-                for _ in range(rgbnet_depth - 2)
-            ],
-            nn.Linear(rgbnet_width, 3),
-        )
-        nn.init.constant_(self.rgbnet[-1].bias, 0)
+        # self.use_render_loss = cfg.get('use_render_loss', False)
+        # self.use_cls_loss = cfg.get('use_cls_loss', False)
+        #
+        # # model kwargs #
+        # self.register_buffer('xyz_min', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_min))
+        # self.register_buffer('xyz_max', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_max))
+        # self.fast_color_thres = self.cfg.render_kwargs.dvgo.fast_color_thres
+        # self.mask_cache_thres = self.cfg.render_kwargs.dvgo.mask_cache_thres
+        #
+        # # determine based grid resolution
+        # self.num_voxels_base = self.cfg.render_kwargs.dvgo.num_voxels_base
+        # self.voxel_size_base = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels_base).pow(1 / 3)
+        #
+        # # determine the density bias shift
+        # self.alpha_init = self.cfg.render_kwargs.dvgo.alpha_init
+        # self.register_buffer('act_shift', torch.FloatTensor([np.log(1 / (1 - self.alpha_init) - 1)]))
+        # self.act_shift -= 4
+        # self.num_voxels = self.cfg.render_kwargs.dvgo.num_voxels
+        # self.voxel_size = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels).pow(1 / 3)
+        # self.world_size = ((self.xyz_max - self.xyz_min) / self.voxel_size).long()
+        # self.voxel_size_ratio = self.voxel_size / self.voxel_size_base
+        #
+        # if colorize_nlabels is not None:
+        #     assert type(colorize_nlabels)==int
+        #     self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
+        # if monitor is not None:
+        #     self.monitor = monitor
+        # viewbase_pe = self.cfg.render_kwargs.dvgo.viewbase_pe
+        # self.register_buffer('viewfreq', torch.FloatTensor([(2 ** i) for i in range(viewbase_pe)]))
+        #
+        # self.residual = MultiScaleAttentionGrid(embed_dim - 1, grid_size=cfg.grid_size)
+        # dim0 = (3 + 3 * viewbase_pe * 2)
+        # if self.cfg.render_kwargs.dvgo.rgbnet_full_implicit:
+        #     pass
+        # elif self.cfg.render_kwargs.dvgo.rgbnet_direct:
+        #     dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim * (1 + len(self.residual.grid_size))
+        # else:
+        #     dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim - 3
+        # rgbnet_width = cfg.render_kwargs.dvgo.rgbnet_width
+        # rgbnet_depth = cfg.render_kwargs.dvgo.rgbnet_depth
+        #
+        # self.rgbnet = nn.Sequential(
+        #     nn.Linear(dim0, rgbnet_width), nn.ReLU(inplace=True),
+        #     *[
+        #         nn.Sequential(nn.Linear(rgbnet_width, rgbnet_width), nn.ReLU(inplace=True))
+        #         for _ in range(rgbnet_depth - 2)
+        #     ],
+        #     nn.Linear(rgbnet_width, 3),
+        # )
+        # nn.init.constant_(self.rgbnet[-1].bias, 0)
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
 
-    def init_from_ckpt(self, path, ignore_keys=list(), use_ema=True):
+    def init_from_ckpt(self, path, ignore_keys=list(), use_ema=False):
         sd = torch.load(path, map_location="cpu")
         sd_keys = sd.keys()
         if 'ema' in list(sd.keys()) and use_ema:
@@ -1246,22 +1338,46 @@ class AutoencoderKL(nn.Module):
         x = x.permute(0, 3, 1, 2).to(memory_format=torch.contiguous_format).float()
         return x
 
-    def render_loss(self, field, render_kwargs, accelerator, opt):
+    def class_loss(self, field, classes_id):
+        b = field.shape[0]
+        # field = self.classifier_conv(field)
+        # logits = self.classifier(field.view(b,-1))
+        logits = self.classifier(field)
+        loss_class = F.cross_entropy(logits, classes_id) * self.cfg.render_kwargs.weight_cls
+        acc = (torch.max(logits, 1)[1].view(classes_id.size()).data == classes_id.data).sum() / b
+        return loss_class, loss_class.detach().item(), acc.item()*100
+
+    def total_variation(self, v, mask=None):
+        tv2 = v.diff(dim=-3).abs()
+        tv3 = v.diff(dim=-2).abs()
+        tv4 = v.diff(dim=-1).abs()
+        if mask is not None:
+            tv2 = tv2[mask[:, :, :-1] & mask[:, :, 1:]]
+            tv3 = tv3[mask[:, :, :, :-1] & mask[:, :, :, 1:]]
+            tv4 = tv4[mask[:, :, :, :, :-1] & mask[:, :, :, :, 1:]]
+        # return (tv2.mean() + tv3.mean() + tv4.mean()) / 3
+        return (tv2.sum() + tv3.sum() + tv4.sum()) / v.shape[-1]
+
+    def render_loss(self, field, render_kwargs, **kwargs):
         # assert len(render_kwargs) == len(field);
         HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess = [
             render_kwargs[k] for k in [
                 'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'images'
             ]
         ]
-        densities = field[:, 0]
-        features = field[:, 1:]
+        densities = field[:, 0].contiguous()
+        features = field[:, 1:].contiguous()
         # features = features + self.residual(features)
         loss_total = 0.
         loss = 0.
         count = 0
         psnr = 0.
-        for dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images in \
-            zip(densities, features, HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess):
+        class_ids = kwargs['class_id']
+        accelerator = kwargs['accelerator']
+        opt_nerf = kwargs['opt_nerf']
+
+        for idx, (dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images, cls_id) in \
+            enumerate(zip(densities, features, HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, class_ids)):
         # for fie, render_kwarg in zip(field, render_kwargs):
             # HW, Ks, near, far, i_train, i_val, i_test, poses, images = [
             #     render_kwarg[k] for k in [
@@ -1271,29 +1387,43 @@ class AutoencoderKL(nn.Module):
             device = dens.device
             rgb_tr_ori = images.to(device)
             render_kwarg_train = {
-                'near': self.cfg.render_kwargs.near,
-                'far': self.cfg.render_kwargs.far,
+                'near': near,
+                'far': far,
                 'bg': self.cfg.render_kwargs.bg,
                 'rand_bkgd': False,
                 'stepsize': self.cfg.render_kwargs.stepsize,
                 'inverse_y': self.cfg.render_kwargs.inverse_y,
                 'flip_x': self.cfg.render_kwargs.flip_x,
                 'flip_y': self.cfg.render_kwargs.flip_y,
+                'class_id': cls_id
             }
-
-            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.get_training_rays_in_maskcache_sampling(
+            # in maskcache
+            # rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.get_training_rays_in_maskcache_sampling(
+            #     rgb_tr_ori=rgb_tr_ori,
+            #     train_poses=poses,
+            #     HW=HW, Ks=Ks,
+            #     ndc=False, inverse_y=render_kwarg_train['inverse_y'],
+            #     flip_x=render_kwarg_train['flip_x'], flip_y=render_kwarg_train['flip_y'],
+            #     density=dens,
+            #     render_kwargs=render_kwarg_train)
+            # flatten
+            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = self.get_training_rays_flatten(
                 rgb_tr_ori=rgb_tr_ori,
                 train_poses=poses,
                 HW=HW, Ks=Ks,
-                ndc=False, inverse_y=False,
-                flip_x=False, flip_y=False,
-                density=dens,
-                render_kwargs=render_kwarg_train)
+                ndc=False, inverse_y=render_kwarg_train['inverse_y'],
+                flip_x=render_kwarg_train['flip_x'], flip_y=render_kwarg_train['flip_y'],
+                )
             # render_kwarg.update()
-            with tqdm(initial=1, total=self.cfg.render_kwargs.inner_iter,
-                  disable=not accelerator.is_main_process) as pbar2:
-                for iter in range(self.cfg.render_kwargs.inner_iter):
+            # with tqdm(initial=1, total=self.cfg.render_kwargs.inner_iter,
+            #       disable=not accelerator.is_main_process) as pbar2:
+            #     for iter in range(self.cfg.render_kwargs.inner_iter):
                 # loss = 0.
+            # print(rgb_tr.shape[0])
+            with tqdm(initial=1, total=self.cfg.render_kwargs.inner_iter,
+                      disable=not accelerator.is_main_process) as pbar2:
+                for iter in range(self.cfg.render_kwargs.inner_iter):
+                    # loss = 0.
                     sel_b = torch.randint(rgb_tr.shape[0], [self.cfg.render_kwargs.N_rand])
                     # sel_r = torch.randint(rgb_tr.shape[1], [self.cfg.render_kwargs.N_rand])
                     # sel_c = torch.randint(rgb_tr.shape[2], [self.cfg.render_kwargs.N_rand])
@@ -1305,8 +1435,8 @@ class AutoencoderKL(nn.Module):
                     rays_o = rays_o_tr[sel_b].to(device)
                     rays_d = rays_d_tr[sel_b].to(device)
                     viewdirs = viewdirs_tr[sel_b]
-                    fea2 = fea + self.residual(fea.unsqueeze(0))[0]
-                    render_result = self.render_train(dens, fea2, rays_o, rays_d, viewdirs, **render_kwarg_train)
+                    # fea2 = fea + self.residual(fea.unsqueeze(0))[0]
+                    render_result = self.render_train(dens, fea, rays_o, rays_d, viewdirs, **render_kwarg_train)
                     loss_main = self.cfg.render_kwargs.weight_main * F.mse_loss(render_result['rgb_marched'], target)
                     psnr_cur = -10. * torch.log10(loss_main.detach()/self.cfg.render_kwargs.weight_main)
                     psnr += psnr_cur
@@ -1317,19 +1447,28 @@ class AutoencoderKL(nn.Module):
                     rgbper_loss = (rgbper * render_result['weights'].detach()).sum() / len(rays_o)
                     loss_rgbper = self.cfg.render_kwargs.weight_rgbper * rgbper_loss
                     loss = loss_main + loss_entropy_last + loss_rgbper
-                    opt.zero_grad()
+                    opt_nerf.zero_grad()
                     accelerator.backward(loss)
-                    opt.step()
+                    opt_nerf.step()
                     pbar2.set_postfix({
                         'inner_iter': iter,
                         'render_loss': loss,
                         'psnr': psnr_cur,
                     })
-                    pbar2.update(1)
-                    loss_total += loss.detach().item()
-                    count += 1
-                    torch.cuda.empty_cache()
-        return loss_total / count, psnr.item() / count
+            count += 1
+            # opt.zero_grad()
+
+            # opt.step()
+            # pbar2.set_postfix({
+            #     'inner_iter': iter,
+            #     'render_loss': loss,
+            #     'psnr': psnr_cur,
+            # })
+            # pbar2.update(1)
+            loss_total += loss.detach().item()
+
+            torch.cuda.empty_cache()
+        return loss / count, loss_total / count, psnr.item() / count / self.cfg.render_kwargs.inner_iter
 
     @torch.no_grad()
     def get_training_rays_in_maskcache_sampling(self, rgb_tr_ori, train_poses, HW, Ks, ndc, inverse_y, flip_x, flip_y, density,
@@ -1370,6 +1509,37 @@ class AutoencoderKL(nn.Module):
         viewdirs_tr = viewdirs_tr[:top]
         eps_time = time.time() - eps_time
         # print('get_training_rays_in_maskcache_sampling: finish (eps time:', eps_time, 'sec)')
+        return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz
+
+    @torch.no_grad()
+    def get_training_rays_flatten(self, rgb_tr_ori, train_poses, HW, Ks, ndc, inverse_y, flip_x, flip_y):
+        # print('get_training_rays_flatten: start')
+        assert len(rgb_tr_ori) == len(train_poses) and len(rgb_tr_ori) == len(Ks) and len(rgb_tr_ori) == len(HW)
+        # eps_time = time.time()
+        DEVICE = rgb_tr_ori[0].device
+        N = sum(im.shape[0] * im.shape[1] for im in rgb_tr_ori)
+        rgb_tr = torch.zeros([N, 3], device=DEVICE)
+        rays_o_tr = torch.zeros_like(rgb_tr)
+        rays_d_tr = torch.zeros_like(rgb_tr)
+        viewdirs_tr = torch.zeros_like(rgb_tr)
+        imsz = []
+        top = 0
+        for c2w, img, (H, W), K in zip(train_poses, rgb_tr_ori, HW, Ks):
+            assert img.shape[:2] == (H, W)
+            rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
+                H=H, W=W, K=K, c2w=c2w, ndc=ndc,
+                inverse_y=inverse_y, flip_x=flip_x, flip_y=flip_y)
+            n = H * W
+            rgb_tr[top:top + n].copy_(img.flatten(0, 1))
+            rays_o_tr[top:top + n].copy_(rays_o.flatten(0, 1).to(DEVICE))
+            rays_d_tr[top:top + n].copy_(rays_d.flatten(0, 1).to(DEVICE))
+            viewdirs_tr[top:top + n].copy_(viewdirs.flatten(0, 1).to(DEVICE))
+            imsz.append(n)
+            top += n
+
+        assert top == N
+        # eps_time = time.time() - eps_time
+        # print('get_training_rays_flatten: finish (eps time:', eps_time, 'sec)')
         return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz
 
     def hit_coarse_geo(self, rays_o, rays_d, density, near, stepsize, **render_kwargs):
@@ -1485,7 +1655,8 @@ class AutoencoderKL(nn.Module):
         #     pass
         # else:
         #     k0 = self.k0(ray_pts)
-        k0 = self.forward_grid(fea, ray_pts)
+        # k0 = self.forward_grid(fea, ray_pts)
+        k0 = self.residual(fea, ray_pts)
 
         if self.rgbnet is None:
             # no view-depend effect
@@ -1501,6 +1672,7 @@ class AutoencoderKL(nn.Module):
             viewdirs_emb = torch.cat([viewdirs, viewdirs_emb.sin(), viewdirs_emb.cos()], -1)
             viewdirs_emb = viewdirs_emb.flatten(0, -2)[ray_id]
             rgb_feat = torch.cat([k0_view, viewdirs_emb], -1)
+            # rgb_logit = self.rgbnet[render_kwargs['class_id']](rgb_feat)
             rgb_logit = self.rgbnet(rgb_feat)
             if self.cfg.render_kwargs.dvgo.rgbnet_direct:
                 rgb = torch.sigmoid(rgb_logit)
@@ -1537,9 +1709,18 @@ class AutoencoderKL(nn.Module):
     def training_step(self, inputs, optimizer_idx, global_step, **kwargs):
         # inputs = self.get_input(batch, self.image_key)
         # opt_nerf = kwargs['opt_nerf']
-        # render_kwargs = inputs["render_kwargs"]
+        render_kwargs = inputs["render_kwargs"]
+        class_id = inputs["class_id"]
         inputs = inputs['input'] / self.std_scale
         reconstructions, posterior = self(inputs)
+        if 'accelerator' in kwargs:
+            accelerator = kwargs['accelerator']
+        else:
+            accelerator = None
+        if 'opt_nerf' in kwargs:
+            opt_nerf = kwargs['opt_nerf']
+        else:
+            opt_nerf = None
 
         if optimizer_idx == 0:
             # train encoder+decoder+logvar
@@ -1547,10 +1728,26 @@ class AutoencoderKL(nn.Module):
                                             last_layer=self.get_last_layer(), split="train")
             # self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
             # self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=False)
-            # if self.use_render_loss:
-            #     render_loss = self.render_loss(reconstructions * self.std_scale, render_kwargs, opt=opt_nerf)
-            #     # aeloss += render_loss
-            #     log_dict_ae.update({'render_loss': render_loss})
+            if self.cfg.render_kwargs.weight_tv > 0:
+                # grid = field[idx].unsqueeze(0)
+                # wx = wy = wz = self.cfg.render_kwargs.weight_tv / len(rays_o)
+                # total_variation_cuda.total_variation_add_grad(
+                #     grid, grid.grad, wx, wy, wz, False)
+                grid = reconstructions
+                loss_tv = self.total_variation(grid) * self.cfg.render_kwargs.weight_tv
+                aeloss += loss_tv
+            if self.use_cls_loss and global_step >= self.cfg.get('cls_start', 0):
+                cls_loss, cls_loss_item, acc = self.class_loss(reconstructions, class_id)
+                aeloss += cls_loss
+                log_dict_ae.update({'cls_loss': cls_loss_item, 'acc': acc})
+            if self.use_render_loss and global_step >= self.cfg.render_start:
+                # print(self.cfg.render_start)
+                render_loss, render_loss_item, psnr = self.render_loss(
+                    # max_min_unnormalize(reconstructions * self.std_scale, self.cfg.maxm, self.cfg.minm),
+                    reconstructions.detach() * self.std_scale,
+                    render_kwargs, class_id=class_id, accelerator=accelerator, opt_nerf=opt_nerf)
+                # aeloss += render_loss
+                log_dict_ae.update({'render_loss': render_loss_item, 'psnr': psnr})
             return aeloss, log_dict_ae
 
         if optimizer_idx == 1:
@@ -1566,10 +1763,10 @@ class AutoencoderKL(nn.Module):
         render_kwargs = inputs["render_kwargs"]
         inputs = inputs['input'] / self.std_scale
         reconstructions, posterior = self(inputs)
-        reconstructions = reconstructions.detach()
-        render_loss_item, psnr = self.render_loss(reconstructions * self.std_scale, render_kwargs,
+        reconstructions = reconstructions
+        render_loss, render_loss_item, psnr = self.render_loss(reconstructions * self.std_scale, render_kwargs,
                                                                accelerator, opt)
-        return {'render_loss': render_loss_item, 'psnr': psnr}
+        return render_loss, {'render_loss': render_loss_item, 'psnr': psnr}
 
     def validation_step(self, inputs, global_step):
         # inputs = self.get_input(batch, self.image_key)
@@ -1619,18 +1816,24 @@ class AutoencoderKL(nn.Module):
         except:
             render_pose = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180,180,5)[:-1]], 0)
             render_poses = [render_pose for _ in range(input.shape[0])]
+
         # Ks = render_kwargs['Ks']
         ndc = render_kwargs.ndc
         render_factor = render_kwargs.render_factor
         if render_factor != 0:
             # HW = np.copy(HW)
             # Ks = np.copy(Ks)
-            H = (H / render_factor).astype(int)
-            W = (W / render_factor).astype(int)
+            H = int(H / render_factor)
+            W = int(W / render_factor)
             K[:2, :3] /= render_factor
 
         #### model ####
         reconstructions, posterior = self(input / self.std_scale)
+        # cls_logits = self.classifier_conv(reconstructions)
+        # cls_logits = self.classifier(cls_logits.view(reconstructions.shape[0], -1))
+        # cls_logits = self.classifier(reconstructions)
+        # cls_ids = torch.max(cls_logits, 1)[1]
+        # reconstructions = max_min_unnormalize(reconstructions * self.std_scale, self.cfg.maxm, self.cfg.minm)
         reconstructions = reconstructions * self.std_scale
         # reconstructions.clamp_(-1, 1)
         # reconstructions = reconstructions / (1 - reconstructions.abs())
@@ -1647,14 +1850,17 @@ class AutoencoderKL(nn.Module):
             # bgmaps = []
             dens = reconstructions[idx_obj][0]
             fea = reconstructions[idx_obj][1:]
-            fea = fea + self.residual(fea.unsqueeze(0))[0]
+            # fea = fea + self.residual(fea.unsqueeze(0))[0]
             render_pose = render_poses[idx_obj]
+
+            # render_kwargs['class_id'] = cls_ids[idx_obj].item()
             for i, c2w in enumerate(render_pose):
                 # H, W = HW[i]
                 # K = Ks[i]
                 # H, W = HW
                 # K = Ks
-                c2w = torch.Tensor(c2w)
+                if not isinstance(c2w, torch.Tensor):
+                    c2w = torch.Tensor(c2w)
                 rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
                     H, W, K, c2w, ndc, inverse_y=render_kwargs.inverse_y,
                     flip_x=render_kwargs.flip_x, flip_y=render_kwargs.flip_y)
@@ -1733,9 +1939,7 @@ class AutoencoderKL(nn.Module):
         # reconstructions = reconstructions / (1 - reconstructions.abs())
         if rotate_flag:
             reconstructions = self.inv_rotate(reconstructions.detach().cpu().numpy(), angle, axes).to(device)
-        # input = input / (1 - input.abs())
-        if rotate_flag:
-            input = self.inv_rotate(input.detach().cpu().numpy(), angle, axes).to(device)
+            # input = self.inv_rotate(input.detach().cpu().numpy(), angle, axes).to(device)
 
         # input[input<-1] = 0
         model_kwargs = render_kwargs.dvgo
@@ -1838,25 +2042,25 @@ class AutoencoderKL(nn.Module):
     '''
 
 if __name__ == '__main__':
-    ddconfig = {'double_z': True,
-      'z_channels': 4,
-      'resolution': (64, 64, 64),
-      'in_channels': 4,
-      'out_ch': 4,
-      'ch': 32,
-      'groups': 8,
-      'ch_mult': [ 1,2,2,2 ],  # num_down = len(ch_mult)-1
-      'num_res_blocks': 2,
-      'attn_resolutions': [ ],
-      'dropout': 0.0}
-    lossconfig = {'disc_start': 50001,
-        'kl_weight': 0.000001,
-        'disc_weight': 0.5,
-        'perceptual_weight': 0,
-        }
-    # model = AutoencoderKL(ddconfig, lossconfig, embed_dim=4,
-    #                       ckpt_path='/pretrain_weights/model-kl-f8.ckpt', )
-    model = AutoencoderKL(ddconfig, lossconfig, embed_dim=4)
+    # ddconfig = {'double_z': True,
+    #   'z_channels': 4,
+    #   'resolution': (64, 64, 64),
+    #   'in_channels': 4,
+    #   'out_ch': 4,
+    #   'ch': 32,
+    #   'groups': 8,
+    #   'ch_mult': [ 1,2,2,2 ],  # num_down = len(ch_mult)-1
+    #   'num_res_blocks': 2,
+    #   'attn_resolutions': [ ],
+    #   'dropout': 0.0}
+    # lossconfig = {'disc_start': 50001,
+    #     'kl_weight': 0.000001,
+    #     'disc_weight': 0.5,
+    #     'perceptual_weight': 0,
+    #     }
+    # # model = AutoencoderKL(ddconfig, lossconfig, embed_dim=4,
+    # #                       ckpt_path='/pretrain_weights/model-kl-f8.ckpt', )
+    # model = AutoencoderKL(ddconfig, lossconfig, embed_dim=4)
     '''
     from torch.optim import AdamW
     optimizer = AdamW(model.parameters(), lr=0.01)
@@ -1867,7 +2071,7 @@ if __name__ == '__main__':
         cur_lr = optimizer.param_groups[0]['lr']
         print(cur_lr)
     '''
-    x = torch.rand(1, 4, 128, 128, 128)
-    with torch.no_grad():
-        y = model(x)
+    # x = torch.rand(1, 4, 128, 128, 128)
+    # with torch.no_grad():
+    #     y = model(x)
     pass

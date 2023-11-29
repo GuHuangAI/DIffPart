@@ -1,3 +1,7 @@
+'''
+compared to original diff_nerf_ddm_const_part.py
+1. add the part embedding as condition
+'''
 import torch
 import torch.nn as nn
 import math
@@ -14,6 +18,7 @@ from torch.cuda.amp import custom_bwd, custom_fwd
 import numpy as np
 from torch_scatter import segment_coo
 from diff_nerf import dvgo, grid
+from diff_nerf.nerf_module_2 import PartAtt
 from torch.utils.cpp_extension import load
 parent_dir = os.path.dirname(os.path.abspath(__file__))
 render_utils_cuda = load(
@@ -100,6 +105,12 @@ class DDPM(nn.Module):
         assert self.sampling_timesteps <= timesteps
         # helper function to register buffer from float64 to float32
         self.use_l1 = use_l1
+        ### define part ###
+        self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
+        nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        # self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
+        self.part_mlp = PartAtt(self.part_fea_dim, self.part_fea_dim, n_layers=4)
+
         # self.perceptual_weight = perceptual_weight
         # if self.perceptual_weight > 0:
         #     self.perceptual_loss = LPIPS().eval()
@@ -251,9 +262,10 @@ class DDPM(nn.Module):
             noise = 2 * torch.rand_like(x_start) - 1.
         else:
             raise NotImplementedError(f'{self.start_dist} is not supported !')
+        part_fea = self.part_mlp(self.part_embeddings.weight)
         C = -1 * x_start             # U(t) = Ct, U(1) = - x0
         x_noisy = self.q_sample(x_start=x_start, noise=noise, t=t, C=C)  # (b, c, h, w)
-        pred = self.model(x_noisy, t, **kwargs)
+        pred = self.model(x_noisy, t, cond=part_fea, **kwargs)
         C_pred, noise_pred = pred
         x_rec = self.pred_x0_from_xt(x_noisy, noise_pred, C_pred, t)
         loss_dict = {}
@@ -708,9 +720,10 @@ class LatentDiffusion(DDPM):
             raise NotImplementedError(f'{self.start_dist} is not supported !')
         # K = -1. * torch.ones_like(x_start)
         # C = noise - x_start  # t = 1000 / 1000
+        part_fea = self.part_mlp(self.part_embeddings.weight)
         C = -1 * x_start  # U(t) = Ct, U(1) = - x0
         x_noisy = self.q_sample(x_start=x_start, noise=noise, t=t, C=C)  # (b, 2, c, h, w)
-        pred = self.model(x_noisy, t, **kwargs)
+        pred = self.model(x_noisy, t, cond=part_fea, **kwargs)
         C_pred, noise_pred = pred
         # C_pred = C_pred / torch.sqrt(t)
         # noise_pred = noise_pred / torch.sqrt(1 - t)

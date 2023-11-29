@@ -35,10 +35,10 @@ def load_conf(config_file, conf={}):
 def main(args):
     cfg = CfgNode(args.cfg)
     model_cfg = cfg.model
-    # first_stage_cfg = model_cfg.first_stage
-    # first_stage_kwargs = {'cfg': first_stage_cfg}
-    # first_stage_kwargs.update(first_stage_cfg)
-    # first_stage_model = construct_class_by_name(**first_stage_kwargs)
+    first_stage_cfg = model_cfg.first_stage
+    first_stage_kwargs = {'cfg': first_stage_cfg}
+    first_stage_kwargs.update(first_stage_cfg)
+    first_stage_model = construct_class_by_name(**first_stage_kwargs)
     # if first_stage_cfg.type == 'ae3d_2':
     #     from diff_nerf.encoder_decoder_3d_2 import AutoencoderKL
     # elif first_stage_cfg.type == 'ae3d_3':
@@ -96,11 +96,12 @@ def main(args):
     #         window_size_k=unet_cfg.window_size_k,
     #         out_mul=unet_cfg.out_mul,
     #     )
-    model_kwargs = {'model': unet, 'model_n': nerf, 'cfg': model_cfg}
+    model_kwargs = {'model': unet, 'model_n': nerf, 'auto_encoder': first_stage_model, 'cfg': model_cfg}
     model_kwargs.update(model_cfg)
     dpm = construct_class_by_name(**model_kwargs)
     model_kwargs.pop('model')
     model_kwargs.pop('nerf')
+    model_kwargs.pop('auto_encoder')
     # if model_cfg.model_type == 'const_sde':
     #     from diff_nerf.diff_nerf_const_sde_ldm import LatentDiffusion
     # elif model_cfg.model_type == 'const_sde_dis':
@@ -151,9 +152,9 @@ def main(args):
                         datatmp[key] = datatmp[key].to(trainer.accelerator.device)
                         # print(trainer.accelerator.device)
                 if isinstance(trainer.model, nn.parallel.DistributedDataParallel):
-                    rgbss, depthss, bgmapss = trainer.model.module.render_img_sample(2, nerf_cfg)
+                    rgbss, depthss, bgmapss = trainer.model.module.render_img_sample(2, nerf_cfg, input=datatmp['input'])
                 elif isinstance(trainer.model, nn.Module):
-                    rgbss, depthss, bgmapss = trainer.model.render_img_sample(2, nerf_cfg)
+                    rgbss, depthss, bgmapss = trainer.model.render_img_sample(2, nerf_cfg, input=datatmp['input'])
                 # all_images = torch.clamp((all_images + 1.0) / 2.0, min=0.0, max=1.0)
 
             # all_images = torch.cat(all_images_list, dim = 0)
@@ -233,7 +234,7 @@ class Trainer(object):
         self.opt_d = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.model.parameters()),
                                      lr=train_lr, weight_decay=cfg.trainer.get('train_wd', 1e-2))
         self.opt_v = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.nerf.parameters()),
-                                     lr=train_lr*10, weight_decay=cfg.trainer.get('train_wd', 1e-2))
+                                     lr=train_lr*5, weight_decay=cfg.trainer.get('train_wd', 1e-2))
         lr_lambda = lambda iter: max((1 - iter / train_num_steps) ** 0.95, cfg.trainer.min_lr)
         self.lr_scheduler_d = torch.optim.lr_scheduler.LambdaLR(self.opt_d, lr_lambda=lr_lambda)
         self.lr_scheduler_v = torch.optim.lr_scheduler.LambdaLR(self.opt_v, lr_lambda=lr_lambda)

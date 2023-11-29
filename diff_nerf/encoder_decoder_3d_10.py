@@ -1210,8 +1210,7 @@ class AutoencoderKL(nn.Module):
                  # rgbnet_dim=4,
                  # rgbnet_width=256,
                  # rgbnet_depth=8,
-                 cfg={},
-                 **kwargs
+                 cfg={}, **kwargs
                  ):
         super().__init__()
         self.image_key = image_key
@@ -1228,7 +1227,7 @@ class AutoencoderKL(nn.Module):
         self.use_render_loss = cfg.get('use_render_loss', False)
         self.use_cls_loss = cfg.get('use_cls_loss', False)
 
-        # dvgo kwargs #
+        # model kwargs #
         self.register_buffer('xyz_min', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_min))
         self.register_buffer('xyz_max', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_max))
         self.fast_color_thres = self.cfg.render_kwargs.dvgo.fast_color_thres
@@ -1254,7 +1253,7 @@ class AutoencoderKL(nn.Module):
             self.monitor = monitor
         viewbase_pe = self.cfg.render_kwargs.dvgo.viewbase_pe
         self.register_buffer('viewfreq', torch.FloatTensor([(2 ** i) for i in range(viewbase_pe)]))
-        self.use_barf_pe = self.cfg.render_kwargs.dvgo.get('use_barf_pe', False)
+
         self.residual = MultiScaleAttentionGrid(embed_dim - 1, grid_size=cfg.grid_size)
         dim0 = (3 + 3 * viewbase_pe * 2)
         if self.cfg.render_kwargs.dvgo.rgbnet_full_implicit:
@@ -1606,19 +1605,6 @@ class AutoencoderKL(nn.Module):
         shape = density.shape
         return dvgo.Raw2Alpha.apply(density.flatten(), self.act_shift, interval).reshape(shape)
 
-    def positional_encoding_barf(self, input_enc, global_step_ratio, L=4, barf_c2f=[0.2, 0.5]): # [B,...,N]
-        # coarse-to-fine: smoothly mask positional encoding for BARF
-        if barf_c2f is not None:
-            # set weights for different frequency bands
-            start, end = barf_c2f
-            alpha = (global_step_ratio - start) / (end - start) * L
-            k = torch.arange(L, dtype=torch.float32, device=input_enc.device)
-            weight = (1-(alpha-k).clamp_(min=0, max=1).mul_(np.pi).cos_())/2
-            # apply weights
-            shape = input_enc.shape
-            input_enc = (input_enc.view(-1, L)*weight).view(*shape)
-        return input_enc
-
     def render_train(self, dens, fea, rays_o, rays_d, viewdirs, **render_kwargs):
         assert len(rays_o.shape) == 2 and rays_o.shape[-1] == 3, 'Only suuport point queries in [N, 3] format'
         # for fie in field:
@@ -1683,11 +1669,7 @@ class AutoencoderKL(nn.Module):
                 k0_view = k0[:, 3:]
                 k0_diffuse = k0[:, :3]
             viewdirs_emb = (viewdirs.unsqueeze(-1) * self.viewfreq).flatten(-2)
-            if self.use_barf_pe:
-                viewdirs_emb = self.positional_encoding_barf(torch.cat([viewdirs_emb.sin(), viewdirs_emb.cos()], -1),
-                                                             L=self.viewfreq, barf_c2f=self.barf_c2f)
-            else:
-                viewdirs_emb = torch.cat([viewdirs, viewdirs_emb.sin(), viewdirs_emb.cos()], -1)
+            viewdirs_emb = torch.cat([viewdirs, viewdirs_emb.sin(), viewdirs_emb.cos()], -1)
             viewdirs_emb = viewdirs_emb.flatten(0, -2)[ray_id]
             rgb_feat = torch.cat([k0_view, viewdirs_emb], -1)
             # rgb_logit = self.rgbnet[render_kwargs['class_id']](rgb_feat)
