@@ -87,8 +87,8 @@ data:
   class_name: diff_nerf.data.VolumeDataset
   data_type: 'blender'
   cls_names: ['03001627', ]
-  tar_path: '/data/huang/diff_nerf/DVGO_results_64x64x64'
-  image_path: '/data/huang/diff_nerf/ShapeNet_Render'
+  tar_path: '/data1/huang/diff_nerf/DVGO_results_64x64x64'
+  image_path: '/data1/huang/diff_nerf/ShapeNet_Render'
   load_rgb_net: False
   load_mask_cache: False
   use_rotate_transform: False
@@ -109,7 +109,7 @@ trainer:
   train_num_steps: 200000
   save_and_sample_every: 10000
   log_freq: 500
-  results_folder: '/data/huang/diff_nerf/results_uncond_ddm_const_dpm_3dunet_sb_joint_chair'
+  results_folder: '/data1/huang/diff_nerf/results_uncond_ddm_const_dpm_3dunet_sb_joint_chair'
   amp: False
   fp16: False
   test_before: True
