@@ -18,6 +18,7 @@ render_utils_cuda = load(
 
 ####   DVGO NeRF  ####
 # Compared to nerf_module: add part attention
+# part fea is feed from diffusion
 class NeRF(nn.Module):
     def __init__(self, cfg, **kwargs):
         super(NeRF, self).__init__()
@@ -61,7 +62,7 @@ class NeRF(nn.Module):
         self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
         nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
         # self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
-        self.part_mlp = PartAtt(self.part_fea_dim, self.part_fea_dim, n_layers=4)
+        # self.part_mlp = PartAtt(self.part_fea_dim, self.part_fea_dim, n_layers=4)
         # dim_index = 3 + 3 * viewbase_pe * 2
         self.index_mlp = IndexMLP(in_dim=self.cfg.dvgo.rgbnet_dim, out_dim=self.part_fea_dim+self.num_parts,
                                   part_dim=self.part_fea_dim, hidden_dim=self.part_fea_dim)
@@ -103,6 +104,7 @@ class NeRF(nn.Module):
         accelerator = kwargs['accelerator']
         opt_nerf = kwargs['opt_nerf']
         joint_learn = kwargs.get('joint_learn', False)
+        part_fea = kwargs.get('part_fea')
         # features = features + self.residual(features)
         loss_weights = kwargs['loss_weight'] if 'loss_weight' in kwargs else torch.ones(len(field),)
         for dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images, masks, lw in \
@@ -156,7 +158,7 @@ class NeRF(nn.Module):
                 rays_o = rays_o_tr[sel_b].to(device)
                 rays_d = rays_d_tr[sel_b].to(device)
                 viewdirs = viewdirs_tr[sel_b]
-                render_result = self.render_train(dens, fea, rays_o, rays_d, viewdirs, **render_kwarg_train)
+                render_result = self.render_train(dens, fea, rays_o, rays_d, viewdirs, part_fea, **render_kwarg_train)
                 loss_main = self.cfg.weight_main * F.mse_loss(render_result['rgb_marched'], target)
                 psnr_cur = -10. * torch.log10(loss_main.detach() / self.cfg.weight_main)
                 # print(psnr_cur)
@@ -244,7 +246,7 @@ class NeRF(nn.Module):
                 # part_feas.append(part_fea)
                 cluster = part_fea.mean(dim=0).unsqueeze(0)
                 clusters.append(cluster)
-                loss += (1 - F.cosine_similarity(part_fea, cluster.repeat(part_fea.shape[0], 1))).mean()
+                loss += (1 - F.cosine_similarity(part_fea, cluster.expand(part_fea.shape[0], -1))).mean()
         for i in range(len(clusters) - 1):
             clus_1 = clusters[i]
             for j in range(i+1, len(clusters)):
@@ -424,7 +426,7 @@ class NeRF(nn.Module):
         shape = density.shape
         return dvgo.Raw2Alpha.apply(density.flatten(), self.act_shift, interval).reshape(shape)
 
-    def render_train(self, dens, fea, rays_o, rays_d, viewdirs, **render_kwargs):
+    def render_train(self, dens, fea, rays_o, rays_d, viewdirs, part_fea, **render_kwargs):
         assert len(rays_o.shape) == 2 and rays_o.shape[-1] == 3, 'Only suuport point queries in [N, 3] format'
         # for fie in field:
         ret_dict = {}
@@ -476,10 +478,10 @@ class NeRF(nn.Module):
         # xyz_emb = (rays_xyz.unsqueeze(-1) * self.viewfreq).flatten(-2)
         # xyz_emb = torch.cat([rays_xyz, xyz_emb.sin(), xyz_emb.cos()], -1)
 
-        part_fea = self.part_mlp(self.part_embeddings.weight)
+        # part_fea = self.part_mlp(self.part_embeddings.weight)
         # index_pred = self.index_mlp(xyz_emb.unsqueeze(1), part_fea[None, ::].repeat(batch, 1, 1)).squeeze(1)
         index_pred = [self.index_mlp(in1, in2) for in1, in2 in zip(k0.unsqueeze(1).split(8192, 0), \
-                                                       part_fea[None, ::].repeat(batch, 1, 1).split(8192, 0)
+                                                       part_fea[None, ::].expand(batch, -1, -1).split(8192, 0)
                                                     )]
         index_pred = torch.cat(index_pred, dim=0).squeeze(1)
         point_fea = index_pred[:, :self.part_fea_dim]
@@ -509,7 +511,7 @@ class NeRF(nn.Module):
             viewdirs_emb = viewdirs_emb.flatten(0, -2)[ray_id]
             k0_view = torch.cat([k0_view, viewdirs_emb], -1)
             rgb_feat = [self.feat_mlp(in1, in2) for in1, in2 in zip(k0_view.unsqueeze(1).split(8192, 0), \
-                                                       part_fea[None, ::].repeat(batch, 1, 1).split(8192, 0)
+                                                       part_fea[None, ::].expand(batch, -1, -1).split(8192, 0)
                                                     )]
             rgb_feat = torch.cat(rgb_feat, dim=0).squeeze(1)
             rgb_feat = torch.cat([rgb_feat, point_fea], dim=-1)

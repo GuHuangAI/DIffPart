@@ -1,7 +1,5 @@
 model:
-  class_name: diff_nerf.diff_nerf_ddm_const_part_2.LatentDiffusion
-  num_parts: 4
-  part_fea_dim: 64
+  class_name: diff_nerf.diff_nerf_ddm_const_part.DDPM
   image_size: [ 64, 64, 64 ]
   std_scale: 4
   ckpt_path:
@@ -15,10 +13,10 @@ model:
   objective: pred_KC
   start_dist: normal
   perceptual_weight: 0
-  scale_factor: 0.3
-  scale_by_std: True
+#  scale_factor: 0.4254
+#  scale_by_std: True
 #  scale_factor: 0.4
-  default_scale: True
+#  default_scale: True
 #  scale_by_softsign: False
   eps: !!float 1e-3
   weighting_loss: True
@@ -26,7 +24,7 @@ model:
   render_start: 20000
   joint_step: 40000
   nerf:
-    class_name: diff_nerf.nerf_module_3.NeRF
+    class_name: diff_nerf.nerf_module_2.NeRF
     num_parts: 4
     part_fea_dim: 64
     maskcache_sampling_step: 40000
@@ -43,16 +41,16 @@ model:
     render_depth: False
     render_mask: True
     rotate_flag: False
-    N_rand: 4096
-    inner_iter: 3
-    inner_iter_indep: 80
-    weight_main: 1. # 1 default
-    weight_entropy_last: 0.001 # 0.001 default
-    weight_rgbper: 0.01 # 0.01 default
-    weight_tv: !!float 1e-7
+    N_rand: 1024
+    inner_iter: 5
+    inner_iter_indep: 100
+    weight_main: 3. # 1 default
+    weight_entropy_last: 0.003 # 0.001 default
+    weight_rgbper: 0.03 # 0.01 default
+    weight_tv: 0 #!!float 1e-6
     weight_cls: 0.1
-    weight_mask: 1.
-    weight_ind_en: 0.01
+    weight_mask: 3.
+    weight_ind_en: 0.02
     weight_comparable: 0.0001
     weight_part_cons: 0.01
     dvgo:
@@ -69,41 +67,10 @@ model:
       rgbnet_full_implicit: False
       rgbnet_depth: 6
       rgbnet_width: 128
-  first_stage:
-    class_name: diff_nerf.encoder_decoder3d.AutoencoderKL
-    embed_dim: 5
-    std_scale: 4
-    use_render_loss: True
-    use_cls_loss: False
-    cls_start: 10000
-    cls_path: "/media/huang/T7/data/diff_nerf/classifier/best_model_res18_rotate_non_normalize"
-    maxm: 191.3546
-    minm: -258.9259
-    lossconfig:
-      disc_start: 80001
-      kl_weight: 0.000001
-      disc_weight: 0.5
-      perceptual_weight: 0
-      disc_in_channels: 5
-      disc_num_layers: 3
-    ddconfig:
-      double_z: True
-      z_channels: 10
-      resolution: [ 64, 64, 64 ]
-      in_channels: 5
-      out_ch: 5
-      ch: 96
-      groups: 1
-      ch_mult: [ 1, 2, 4 ]  # num_down = len(ch_mult)-1
-      num_res_blocks: 2
-      attn_resolutions: [ ]
-      dropout: 0.0
-    ckpt_path: '/home/huang/Downloads/mobaxterm/diffnerf/chair/model-13.pt'
 
   unet:
-    class_name: diff_nerf.part_cond_3dunet_sb.Unet3D
+    class_name: diff_nerf.uncond_3dunet_sb.Unet3D
     dim: 64
-    part_dim: 64
     dim_mults: [1, 2, 4]
     channels: 5
     resnet_block_groups: 8
@@ -119,32 +86,33 @@ model:
 data:
   class_name: diff_nerf.data.VolumeDataset
   data_type: 'blender'
-  tar_path: '/media/huang/T7/data/diff_nerf/DVGO_results_64x64x64'
-  image_path: '/media/huang/T7/data/diff_nerf/ShapeNet_Render'
+  cls_names: ['02818832', ]
+  tar_path: '/data1/huang/diff_nerf/DVGO_results_64x64x64'
+  image_path: '/data1/huang/diff_nerf/ShapeNet_Render'
   load_rgb_net: False
   load_mask_cache: False
   use_rotate_transform: False
-  batch_size: 1
+  batch_size: 2
   white_bkgd: True
   load_render_kwargs: True
   load_mask: True
-  sample_num: 5
+  sample_num: 10
   normalize: False
   maxm: 191.3546
   minm: -258.9259
 
 trainer:
-  gradient_accumulate_every: 4  # not true gradient_accumulate_every, but used for optimize g and d alternately
+  gradient_accumulate_every: 1  # not true gradient_accumulate_every, but used for optimize g and d alternately
   lr: !!float 5e-5
   min_lr: !!float 1e-5
   train_wd: !!float 1e-2
   train_num_steps: 200000
   save_and_sample_every: 10000
   log_freq: 500
-  results_folder: '/media/huang/T7/data/diff_nerf/results_uncond_ddm_const_ldm_3dunet_sb_joint_part3'
+  results_folder: '/data1/huang/diff_nerf/results_uncond_ddm_const_dpm_3dunet_sb_joint_bed'
   amp: False
   fp16: False
-  test_before: False
+  test_before: True
   resume_milestone: current
   ema_update_after_step: 10000
   ema_update_every: 10

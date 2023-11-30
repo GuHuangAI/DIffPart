@@ -482,7 +482,7 @@ class Unet3D(nn.Module):
     def __init__(
         self,
         dim,
-        text_dim= 128,
+        part_dim= 128,
         init_dim = None,
         out_dim = None,
         dim_mults=(1, 2, 4, 8),
@@ -536,10 +536,10 @@ class Unet3D(nn.Module):
 
         # cond embedding
         self.cond_mlps = nn.ModuleList([])
-        self.cond_mlps.append(nn.Linear(text_dim, dims[0]))
-        self.cond_mlps.append(nn.Linear(text_dim, dims[1]))
-        self.cond_mlps.append(nn.Linear(text_dim, dims[2]))
-        self.cond_mlps.append(nn.Linear(text_dim, dims[3]))
+        self.cond_mlps.append(nn.Linear(part_dim, dims[0]))
+        self.cond_mlps.append(nn.Linear(part_dim, dims[1]))
+        self.cond_mlps.append(nn.Linear(part_dim, dims[2]))
+        self.cond_mlps.append(nn.Linear(part_dim, dims[3]))
 
         # layers
 
@@ -560,8 +560,8 @@ class Unet3D(nn.Module):
                 Downsample(dim_in, dim_out) if not is_last else nn.Conv3d(dim_in, dim_out, 3, padding = 1)
             ]))
             self.relations_down.append(
-                CondAttention(dim=dims[ind], heads=heads, window_size_q=window_size_q[len(in_out) - 1 - ind],
-                        window_size_k=window_size_k[len(in_out) - 1 - ind]),
+                CondAttention(dim=dims[ind], heads=heads, window_size_q=window_size_q[ind],
+                        window_size_k=window_size_k[ind]),
             )
 
 

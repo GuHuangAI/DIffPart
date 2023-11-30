@@ -279,7 +279,7 @@ class DDPM(nn.Module):
         loss_simple = loss_simple.mean()
         loss_dict.update({f'{prefix}/loss_simple': loss_simple})
         rec_weight = (1 - t.reshape(C.shape[0], 1)) ** 2
-        render_weight = -torch.log(t.reshape(C.shape[0], 1)) / 2
+        render_weight = -torch.log(t.reshape(C.shape[0], 1))
         loss_vlb += torch.abs(x_rec - target3).mean([1, 2, 3, 4]) * rec_weight
         loss_vlb = loss_vlb.mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
@@ -754,7 +754,7 @@ class LatentDiffusion(DDPM):
         loss_simple = loss_simple.mean()
         loss_dict.update({f'{prefix}/loss_simple': loss_simple})
         rec_weight = (1 - t.reshape(C.shape[0], 1)) ** 2
-        render_weight = -torch.log(t.reshape(C.shape[0], 1)) / 2
+        render_weight = -torch.log(t.reshape(C.shape[0], 1))
         loss_vlb += torch.abs(x_rec - target3).mean([1, 2, 3, 4]) * rec_weight
         # if self.perceptual_weight > 0.:
         #     loss_vlb += self.perceptual_loss(x_rec, target3).mean([1, 2, 3])

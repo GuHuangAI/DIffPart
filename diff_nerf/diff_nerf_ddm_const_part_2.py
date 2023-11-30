@@ -106,6 +106,8 @@ class DDPM(nn.Module):
         # helper function to register buffer from float64 to float32
         self.use_l1 = use_l1
         ### define part ###
+        self.num_parts = cfg.get("num_parts", 4)
+        self.part_fea_dim = cfg.get("part_fea_dim", 64)
         self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
         nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
         # self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
@@ -291,7 +293,7 @@ class DDPM(nn.Module):
         loss_simple = loss_simple.mean()
         loss_dict.update({f'{prefix}/loss_simple': loss_simple})
         rec_weight = (1 - t.reshape(C.shape[0], 1)) ** 2
-        render_weight = -torch.log(t.reshape(C.shape[0], 1)) / 2
+        render_weight = -torch.log(t.reshape(C.shape[0], 1))
         loss_vlb += torch.abs(x_rec - target3).mean([1, 2, 3, 4]) * rec_weight
         loss_vlb = loss_vlb.mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
@@ -308,7 +310,7 @@ class DDPM(nn.Module):
 
 
         if self.use_render_loss and global_step >= self.cfg.get('render_start', 0):
-
+            kwargs['part_fea'] = part_fea
             if global_step >= self.cfg.get("joint_step", 0): # joint optimizing
                 render_kwargs = batch["render_kwargs"]
                 loss_render, loss_render_dict = self.nerf(x_rec * self.std_scale, render_kwargs, loss_weight=render_weight,
@@ -767,7 +769,7 @@ class LatentDiffusion(DDPM):
         loss_simple = loss_simple.mean()
         loss_dict.update({f'{prefix}/loss_simple': loss_simple})
         rec_weight = (1 - t.reshape(C.shape[0], 1)) ** 2
-        render_weight = -torch.log(t.reshape(C.shape[0], 1)) / 2
+        render_weight = -torch.log(t.reshape(C.shape[0], 1))
         loss_vlb += torch.abs(x_rec - target3).mean([1, 2, 3, 4]) * rec_weight
         # if self.perceptual_weight > 0.:
         #     loss_vlb += self.perceptual_loss(x_rec, target3).mean([1, 2, 3])
@@ -789,7 +791,7 @@ class LatentDiffusion(DDPM):
         #     loss += cls_loss.mean()
         #     loss_dict.update({'cls_loss': cls_loss_item, 'acc': acc})
         if self.use_render_loss and global_step >= self.cfg.get('render_start', 0):
-
+            kwargs['part_fea'] = part_fea # num_parts, part_fea_dim
             if global_step >= self.cfg.get("joint_step", 0): # joint optimizing
                 render_kwargs = batch["render_kwargs"]
                 loss_render, loss_render_dict = self.nerf(x_rec_dec * self.std_scale, render_kwargs, loss_weight=render_weight,
