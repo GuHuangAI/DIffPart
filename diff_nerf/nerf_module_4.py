@@ -23,8 +23,9 @@ render_utils_cuda = load(
         verbose=True)
 
 ####   DVGO NeRF  ####
-# Compared to nerf_module: add part attention
-# part fea is feed from diffusion
+# Compared to nerf_module: add part shape and part texture features
+# occupancy rendering for part label
+
 class NeRF(nn.Module):
     def __init__(self, cfg, **kwargs):
         super(NeRF, self).__init__()

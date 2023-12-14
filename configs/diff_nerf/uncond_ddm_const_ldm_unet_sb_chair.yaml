@@ -44,7 +44,7 @@ model:
     render_mask: True
     rotate_flag: False
     N_rand: 4096
-    inner_iter: 3
+    inner_iter: 2
     inner_iter_indep: 80
     weight_main: 1. # 1 default
     weight_entropy_last: 0.001 # 0.001 default
@@ -144,7 +144,7 @@ trainer:
   results_folder: '/media/huang/T7/data/diff_nerf/results_uncond_ddm_const_ldm_3dunet_sb_joint_part3'
   amp: False
   fp16: False
-  test_before: False
+  test_before: True
   resume_milestone: current
   ema_update_after_step: 10000
   ema_update_every: 10

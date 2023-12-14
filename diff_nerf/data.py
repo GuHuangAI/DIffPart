@@ -5,6 +5,7 @@ import torch.utils.data as data
 import torch.nn.functional as F
 from pathlib import Path
 import json
+from PIL import Image
 from functools import partial
 from bisect import bisect_left, bisect_right
 import collections
@@ -71,13 +72,17 @@ def max_min_unnormalize(x, maxm, minm, new_maxm=1, new_minm=-1):
     return x
 
 class VolumeDataset(data.Dataset):
-    def __init__(self, tar_path, image_path, load_rgb_net=False, maxm=191.3546, minm=-258.9259,
+    def __init__(self, tar_path, image_path, part_path=None, load_rgb_net=False, maxm=191.3546, minm=-258.9259,
                  use_rotate_transform=True, load_mask_cache=False, scale_factor=1, normalize=False,
                  sample_num=5, split='train', load_render_kwargs=False, load_mask=False,
                  cfg={}, **kwargs):
         super(VolumeDataset, self).__init__()
         self.tar_path = Path(tar_path)
         self.image_path = Path(image_path)
+        if part_path is not None:
+            self.part_path = Path(part_path)
+        else:
+            self.part_path = None
         self.sample_num = sample_num
         self.split = split
         self.maxm = maxm
@@ -180,8 +185,8 @@ class VolumeDataset(data.Dataset):
         # field = nn.functional.interpolate(field.unsqueeze(0),
         #                                   scale_factor=self.scale_factor, mode='trilinear').squeeze(0)
         # field = nn.functional.softsign(field)
-
         res['kwargs'] = obj_kwargs
+        res['obj_idx'] = obj_idx
         res['input'] = field
         try:
             res['class_id'] = cls_maps[cls_name]
@@ -203,11 +208,12 @@ class VolumeDataset(data.Dataset):
             data_type = self.cfg.get('data_type', 'blender')
             if data_type == "blender":
                 image_path = self.image_path / cls_name / obj_name / 'images'
+                # part_path = self.part_path / cls_name/ obj_name / 'images'
             elif data_type == "srn":
                 image_path = self.image_path / cls_name / obj_name
             else:
                 raise NotImplementedError
-            render_kwargs = load_data(image_path, sample_num=self.sample_num, white_bkgd=self.white_bkgd,
+            render_kwargs = load_data2(image_path, sample_num=self.sample_num, white_bkgd=self.white_bkgd,
                                       split=self.split, half_res=self.half_res, data_type=data_type,
                                       load_mask=self.load_mask)
             res['render_kwargs'] = render_kwargs
@@ -278,6 +284,81 @@ def load_blender_data(basedir, half_res=False, sample_num=5, split='train'):
         # imgs = tf.image.resize_area(imgs, [400, 400]).numpy()
 
     return imgs, poses, [H, W, focal], i_split, depths
+
+def load_blender_data2(basedir, half_res=False, sample_num=5, split='train'):
+    assert split in ['train', 'val', 'test'];
+    metas = {}
+    # for s in splits:
+    #     with open(os.path.join(basedir, 'transforms_{}.json'.format(s)), 'r') as fp:
+    #         metas[s] = json.load(fp)
+    with open(os.path.join(basedir, 'transforms_{}.json'.format(split)), 'r') as fp:
+        metas[split] = json.load(fp)
+
+    all_imgs = []
+    all_poses = []
+    all_parts = []
+    counts = [0]
+    for s in [split]:
+        meta = metas[s]
+        imgs = []
+        poses = []
+        part_labels = []
+        # if s=='train' or testskip==0:
+        #     skip = 1
+        # else:
+        #     skip = testskip
+        # for frame in meta['frames'][::skip]:
+        if sample_num > 0:
+            frames = random.sample(meta['frames'], sample_num)
+        for frame in frames:
+            fname = os.path.join(basedir, frame['file_path'] + '.png')
+            fname_p = os.path.join(basedir, frame['file_path'][:-6] + 'parts.png')
+            imgs.append(imageio.imread(fname))
+            part_label = np.array(Image.open(fname_p))
+            # part_label_tmp = np.array(Image.open(fname_p))[..., :3]
+            # h, w = part_label_tmp.shape[:2]
+            # part_label_tmp = part_label_tmp.reshape(h*w, 3)
+            # part_label = np.zeros((h, w))
+            # for i in range(h):
+            #     for j in range(w):
+            #         part_label[np.where]
+            part_labels.append(part_label)
+            poses.append(np.array(frame['transform_matrix']))
+        imgs = (np.array(imgs) / 255.).astype(np.float32) # keep all 4 channels (RGBA)
+        part_labels = (np.array(part_labels) / 255.).astype(np.long)
+        poses = np.array(poses).astype(np.float32)
+        counts.append(counts[-1] + imgs.shape[0])
+        all_imgs.append(imgs)
+        all_parts.append(part_labels)
+        all_poses.append(poses)
+
+    i_split = [np.arange(counts[i], counts[i+1]) for i in range(1)]
+
+    imgs = np.concatenate(all_imgs, 0)
+    poses = np.concatenate(all_poses, 0)
+
+    H, W = imgs[0].shape[:2]
+    camera_angle_x = float(meta['camera_angle_x'])
+    focal = .5 * W / np.tan(.5 * camera_angle_x)
+
+    # render_poses = torch.stack([pose_spherical(angle, -30.0, 4.0) for angle in np.linspace(-180,180,160+1)[:-1]], 0)
+
+    if half_res:
+        H = H//2
+        W = W//2
+        focal = focal/2.
+
+        imgs_half_res = np.zeros((imgs.shape[0], H, W, 4))
+        parts_half_res = np.zeros((part_labels.shape[0], H, W))
+        for i, (img, dpt) in enumerate(zip(imgs, part_labels)):
+            imgs_half_res[i] = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
+            parts_half_res[i] = cv2.resize(dpt, (W, H), interpolation=cv2.NEAREST)
+        imgs = imgs_half_res
+        part_labels = parts_half_res
+        # imgs = tf.image.resize_area(imgs, [400, 400]).numpy()
+
+    return imgs, poses, [H, W, focal], i_split, part_labels
+
 
 trans_t = lambda t : torch.Tensor([
     [1,0,0,0],
@@ -404,7 +485,66 @@ def load_data(datadir, half_res=False, sample_num=5, split='train',
         data_dict['depths'] = depths
     if load_mask:
         data_dict['masks'] = masks
+    return data_dict
 
+def load_data2(image_dir, half_res=False, sample_num=5, split='train',
+              white_bkgd=False, data_type='blender', load_mask=False):
+    K, depths = None, None
+    near_clip = None
+    if data_type == 'blender':
+        images, poses, hwf, i_split, parts = load_blender_data2(image_dir, half_res,
+                                                                 sample_num, split=split)
+    elif data_type == 'srn':
+        images, poses, hwf, i_split, parts = load_srn_data(image_dir, half_res, sample_num, split=split)
+    else:
+        raise NotImplementedError
+    # print('Loaded blender', images.shape, hwf, datadir)
+    i_train = i_val = i_test = i_split[0]
+    if data_type == 'blender':
+        near, far = 2., 4.
+    elif data_type == 'srn':
+        near, far = inward_nearfar_heuristic(poses[i_train, :3, 3])
+    else:
+        raise NotImplementedError
+
+    # near, far = 2., 6.
+    if load_mask:
+        masks = images[..., -1]
+    if images.shape[-1] == 4:
+        if white_bkgd:
+            images = images[..., :3] * images[..., -1:] + (1. - images[..., -1:])
+            # depths = depths[..., :3] * depths[..., -1:] + (1. - depths[..., -1:])
+        else:
+            images = images[..., :3] * images[..., -1:]
+            # depths = depths[..., :3] * depths[..., -1:]
+    # Cast intrinsics to right types
+    H, W, focal = hwf
+    H, W = int(H), int(W)
+    hwf = [H, W, focal]
+    HW = np.array([im.shape[:2] for im in images])
+    irregular_shape = (images.dtype is np.dtype('object'))
+
+    if K is None:
+        K = np.array([
+            [focal, 0, 0.5 * W],
+            [0, focal, 0.5 * H],
+            [0, 0, 1]
+        ])
+
+    if len(K.shape) == 2:
+        Ks = K[None].repeat(len(poses), axis=0)
+    else:
+        Ks = K
+    data_dict = dict(
+        hwf=hwf, HW=HW, Ks=Ks,
+        near=near, far=far, #near_clip=near_clip,
+        i_train=i_train, i_val=i_val, i_test=i_test,
+        poses=poses,
+        images=images, parts=parts, #depths=depths,
+        irregular_shape=irregular_shape,
+    )
+    if load_mask:
+        data_dict['masks'] = masks
     return data_dict
 
 def generalTransform(image, x_center, y_center, z_center, transform_matrix, method='linear'):
@@ -585,14 +725,15 @@ if __name__ == '__main__':
     #     if item not in obj_list2:
     #         print(item)
 
-    tar_path = '/media/huang/T7/data/diff_nerf/DVGO_results_64x64x64'
-    image_path = '/media/huang/T7/data/diff_nerf/ShapeNet_Render'
+    # tar_path = '/media/huang/T7/data/diff_nerf/DVGO_results_64x64x64'
+    # image_path = '/media/huang/T7/data/diff_nerf/ShapeNet_Render'
     # tar_path = '/media/huang/T7/data/abo_tables/DVGO_results_32x32x32'
     # image_path = '/media/huang/T7/data/abo_tables/tables_train'
+    tar_path = '/media/huang/T7/data/diff_nerf/Vox_96_ShapeNet_v1'
+    image_path = '/media/huang/T7/data/diff_nerf/ShapeNet_v1_Part_Data'
     from fvcore.common.config import CfgNode
-    cfg = CfgNode({'white_bkgd': True,
-                      'data_type': 'blender',})
-    dataset = VolumeDataset(tar_path, image_path, use_rotate_transform=False, load_render_kwargs=True,
+    cfg = CfgNode({'white_bkgd': True, 'data_type': 'blender',})
+    dataset = VolumeDataset(tar_path, image_path, use_rotate_transform=False, load_render_kwargs=False,
                             cfg=cfg, sample_num=5)
     d = dataset[0]
     sd1 = 0
@@ -607,8 +748,10 @@ if __name__ == '__main__':
             maxm = field.max()
         if field.min() < minm:
             minm = field.min()
-        sd1 += field[:1, :].std()
-        sd2 += field[1:, :].std()
+        den = field[:1, :]
+        fea = field[1:, :]
+        sd1 += den[den!=0.].std()
+        sd2 += fea[fea!=0.].std()
         sd3 += field.std()
     dl = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True,
                     pin_memory=True, num_workers=2, collate_fn=default_collate)

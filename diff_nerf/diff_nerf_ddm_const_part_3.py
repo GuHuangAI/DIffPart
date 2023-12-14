@@ -1,6 +1,7 @@
 '''
 compared to original diff_nerf_ddm_const_part.py
 1. add the part embedding as condition
+2. add the shape and texture embedding
 '''
 import torch
 import torch.nn as nn
@@ -8,7 +9,7 @@ import math
 import torch.nn.functional as F
 import os
 from diff_nerf.utils import default, identity, normalize_to_neg_one_to_one, unnormalize_to_zero_to_one
-from tqdm.auto import tqdm
+import random
 from einops import rearrange, reduce
 from functools import partial
 from diff_nerf.mesh_utils import export_meshes_to_path
@@ -17,7 +18,6 @@ from torch.cuda.amp import custom_bwd, custom_fwd
 import numpy as np
 from torch_scatter import segment_coo
 from diff_nerf import dvgo, grid
-from diff_nerf.nerf_module_2 import PartAtt
 from torch.utils.cpp_extension import load
 parent_dir = os.path.dirname(os.path.abspath(__file__))
 render_utils_cuda = load(
@@ -107,76 +107,16 @@ class DDPM(nn.Module):
         ### define part ###
         self.num_parts = cfg.get("num_parts", 4)
         self.part_fea_dim = cfg.get("part_fea_dim", 64)
-        self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
-        nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        self.shape_embs = nn.Embedding(cfg.get("num_shape", 500), self.part_fea_dim)
+        self.texture_embs = nn.Embedding(cfg.get("num_shape", 500), self.part_fea_dim)
+        # self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
+        # nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        nn.init.normal_(self.shape_embs.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        nn.init.normal_(self.texture_embs.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
         # self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
-        self.part_mlp = PartAtt(self.part_fea_dim, self.part_fea_dim, n_layers=4)
+        self.part_shape_mlp = DecNet(self.num_parts, self.part_fea_dim, n_layers=3)
+        self.part_texture_mlp = DecNet(self.num_parts, self.part_fea_dim, n_layers=3)
 
-        # self.perceptual_weight = perceptual_weight
-        # if self.perceptual_weight > 0:
-        #     self.perceptual_loss = LPIPS().eval()
-        '''
-        # dvgo kwargs #
-        self.register_buffer('xyz_min', torch.Tensor(self.cfg.dvgo.xyz_min))
-        self.register_buffer('xyz_max', torch.Tensor(self.cfg.dvgo.xyz_max))
-        self.fast_color_thres = self.cfg.dvgo.fast_color_thres
-        self.mask_cache_thres = self.cfg.dvgo.mask_cache_thres
-
-        # determine based grid resolution
-        self.num_voxels_base = self.cfg.dvgo.num_voxels_base
-        self.voxel_size_base = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels_base).pow(1 / 3)
-
-        # determine the density bias shift
-        self.alpha_init = self.cfg.dvgo.alpha_init
-        self.register_buffer('act_shift', torch.FloatTensor([np.log(1 / (1 - self.alpha_init) - 1)]))
-        self.act_shift -= 4
-        self.num_voxels = self.cfg.dvgo.num_voxels
-        self.voxel_size = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels).pow(1 / 3)
-        self.world_size = ((self.xyz_max - self.xyz_min) / self.voxel_size).long()
-        self.voxel_size_ratio = self.voxel_size / self.voxel_size_base
-
-        # if colorize_nlabels is not None:
-        #     assert type(colorize_nlabels)==int
-        #     self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
-
-        viewbase_pe = self.cfg.dvgo.viewbase_pe
-        self.register_buffer('viewfreq', torch.FloatTensor([(2 ** i) for i in range(viewbase_pe)]))
-        self.use_barf_pe = self.cfg.dvgo.get('use_barf_pe', False)
-        # self.residual = MultiScaleAttentionGrid(embed_dim - 1, grid_size=cfg.grid_size)
-        dim0 = (3 + 3 * viewbase_pe * 2)
-        if self.cfg.dvgo.rgbnet_full_implicit:
-            pass
-        elif self.cfg.dvgo.rgbnet_direct:
-            dim0 += self.cfg.dvgo.rgbnet_dim #* (1 + len(self.residual.grid_size))
-        else:
-            dim0 += self.cfg.dvgo.rgbnet_dim - 3
-        rgbnet_width = cfg.dvgo.rgbnet_width
-        rgbnet_depth = cfg.dvgo.rgbnet_depth
-
-        # part kwargs
-        self.num_parts = self.cfg.get('num_parts', 8)
-        self.part_fea_dim = self.cfg.get('part_fea_dim', 128)
-        self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
-        nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
-        self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
-        dim_index = 3 + 3 * viewbase_pe * 2
-        self.index_mlp = IndexMLP(in_dim=dim_index, out_dim=self.num_part+1, part_dim=self.part_fea_dim)
-
-        dim0 += self.part_fea_dim
-        # part render mlps
-        self.rgbnets = nn.ModuleList()
-        for _ in self.num_parts:
-            rgbnet = nn.Sequential(
-                nn.Linear(dim0, rgbnet_width), nn.ReLU(inplace=True),
-                *[
-                    nn.Sequential(nn.Linear(rgbnet_width, rgbnet_width), nn.ReLU(inplace=True))
-                    for _ in range(rgbnet_depth - 2)
-                ],
-                nn.Linear(rgbnet_width, 3),
-            )
-            nn.init.constant_(rgbnet[-1].bias, 0)
-            self.rgbnets.append(rgbnet)
-        '''
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys, only_model)
 
@@ -716,6 +656,7 @@ class LatentDiffusion(DDPM):
 
     def p_losses(self, batch, t, noise=None, global_step=1e9, **kwargs):
         x_start = batch['input']
+        idx = batch['obj_idx']
         if self.start_dist == 'normal':
             noise = torch.randn_like(x_start)
         elif self.start_dist == 'uniform':
@@ -724,10 +665,11 @@ class LatentDiffusion(DDPM):
             raise NotImplementedError(f'{self.start_dist} is not supported !')
         # K = -1. * torch.ones_like(x_start)
         # C = noise - x_start  # t = 1000 / 1000
-        part_fea = self.part_mlp(self.part_embeddings.weight)
+        part_shape_fea = self.part_shape_mlp(self.shape_embs[idx]) # B, num_parts, part_fea_dim
+        part_texture_fea = self.part_texture_mlp(self.texture_embs[idx]) # B, num_parts, part_fea_dim
         C = -1 * x_start  # U(t) = Ct, U(1) = - x0
         x_noisy = self.q_sample(x_start=x_start, noise=noise, t=t, C=C)  # (b, 2, c, h, w)
-        pred = self.model(x_noisy, t, cond=part_fea, **kwargs)
+        pred = self.model(x_noisy, t, cond1=part_shape_fea, cond2=part_texture_fea, **kwargs)
         C_pred, noise_pred = pred
         # C_pred = C_pred / torch.sqrt(t)
         # noise_pred = noise_pred / torch.sqrt(1 - t)
@@ -757,8 +699,8 @@ class LatentDiffusion(DDPM):
         if self.weighting_loss:
             # simple_weight1 = torch.exp(t)
             # simple_weight2 = torch.exp(torch.sqrt(1 - t))
-            simple_weight1 = 1 / t.sqrt()
-            simple_weight2 = 1 / (1 - t + self.eps).sqrt()
+            simple_weight1 = 1 / t#.sqrt()
+            simple_weight2 = 1 / (1 - t + self.eps)#.sqrt()
         else:
             simple_weight1 = 1
             simple_weight2 = 1
@@ -795,14 +737,16 @@ class LatentDiffusion(DDPM):
         if self.use_render_loss and global_step >= self.cfg.get('render_start', 0):
             if global_step >= self.cfg.get("joint_step", 0): # joint optimizing
                 render_kwargs = batch["render_kwargs"]
-                kwargs['part_fea'] = part_fea  # num_parts, part_fea_dim
+                kwargs['part_shape_fea'] = part_shape_fea  # num_parts, part_fea_dim
+                kwargs['part_texture_fea'] = part_texture_fea  # num_parts, part_fea_dim
                 loss_render, loss_render_dict = self.nerf(x_rec_dec * self.std_scale, render_kwargs, loss_weight=render_weight,
                                                           global_step=global_step, joint_learn=True, **kwargs)
                 loss_dict.update(loss_render_dict)
                 loss += loss_render
             else: # independent optimizing
                 render_kwargs = batch["render_kwargs"]
-                kwargs['part_fea'] = part_fea.detach()  # num_parts, part_fea_dim
+                kwargs['part_shape_fea'] = part_shape_fea.detach()  # num_parts, part_fea_dim
+                kwargs['part_texture_fea'] = part_texture_fea.detach()  # num_parts, part_fea_dim
                 loss_render, loss_render_dict = self.nerf(x_rec_dec.detach() * self.std_scale, render_kwargs, loss_weight=render_weight,
                                                           global_step=global_step, **kwargs)
                 loss_dict.update(loss_render_dict)
@@ -970,8 +914,10 @@ class LatentDiffusion(DDPM):
             if cond is not None:
                 pred = self.model(img, cur_time, cond)
             else:
-                part_fea = self.part_mlp(self.part_embeddings.weight)
-                pred = self.model(img, cur_time, cond=part_fea)
+                idx = random.choice(range(self.shape_embs.weight.shape[0]))
+                part_shape_fea = self.part_shape_mlp(self.shape_embs[idx])  # B, num_parts, part_fea_dim
+                part_texture_fea = self.part_texture_mlp(self.texture_embs[idx])  # B, num_parts, part_fea_dim
+                pred = self.model(img, cur_time, cond1=part_shape_fea, cond2=part_texture_fea)
             # C, noise = pred.chunk(2, dim=1)
             C, noise = pred[:2]
             if self.scale_by_softsign:
@@ -1117,3 +1063,74 @@ class SpecifyGradient2(torch.autograd.Function):
         # pdb.set_trace()
         gt_grad = grad_scale
         return gt_grad, None
+
+class PartAtt(nn.Module):
+    def __init__(self, in_dim, out_dim=128, n_layers=3):
+        super(PartAtt, self).__init__()
+        # self.in_layer = nn.Linear(in_dim, out_dim)
+        self.hidden_layers = nn.ModuleList()
+        for _ in range(n_layers):
+            self.hidden_layers.append(SelfAttLayer(in_dim, reduce=1))
+
+    def forward(self, x):
+        # x : b, num_parts, part_dim
+        # x = self.in_layer(x)
+        for hidden_layer in self.hidden_layers:
+            x = hidden_layer(x)
+        return x
+
+class SelfAttLayer(nn.Module):
+    def __init__(self, dim, heads=4, reduce=1, ffn_dim_mul=2, drop=0.):
+        super().__init__()
+        self.dim_head = dim // heads
+        self.scale = self.dim_head ** -0.5
+        self.heads = heads
+        self.reduce = reduce
+        # hidden_dim = dim_head * heads
+        ffn_dim = ffn_dim_mul * dim
+        self.softmax = nn.Softmax(dim=-1)
+        self.q_lin = nn.Linear(dim, dim//reduce)
+        self.k_lin = nn.Linear(dim, dim//reduce)
+        self.v_lin = nn.Linear(dim, dim)
+        self.concat_lin = nn.Linear(dim, dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, ffn_dim),
+            nn.ReLU(),
+            nn.Linear(ffn_dim, dim)
+        )
+        self.dropout = nn.Dropout(drop)
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        b, l, c = x.shape
+        q = self.q_lin(x)
+        k = self.k_lin(x)
+        v = self.v_lin(x)
+        q = q.view(b, l, self.heads, self.dim_head//self.reduce).transpose(1, 2)  # b, head, l, dim_head
+        k = k.view(b, l, self.heads, self.dim_head//self.reduce).transpose(1, 2)
+        v = v.view(b, l, self.heads, self.dim_head).transpose(1, 2)
+
+        q = q * self.scale
+        k_t = k.transpose(2, 3)  # transpose
+        att = self.softmax(q @ k_t)
+        v = att @ v  # b, head, l ,dim_head
+        v = v.transpose(1, 2).contiguous().view(b, l, c)
+        x = x + self.concat_lin(v)
+        # x = x + v
+        x = self.norm1(x)
+        x = x + self.dropout(self.ffn(x))
+        x = self.norm2(x)
+        return x
+
+class DecNet(nn.Module):
+    def __init__(self, num_parts, part_fea_dim, n_layers=4):
+        self.num_parts = num_parts
+        self.part_fea_dim = part_fea_dim
+        self.mlp = nn.Linear(part_fea_dim, num_parts * part_fea_dim)
+        self.att = PartAtt(self.part_fea_dim, self.part_fea_dim, n_layers=n_layers)
+
+    def forward(self, x):
+        x = self.mlp(x).reshape(-1, self.num_parts, self.part_fea_dim)
+        x = self.att(x)
+        return x
