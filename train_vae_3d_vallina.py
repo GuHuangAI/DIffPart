@@ -372,7 +372,7 @@ class Trainer(object):
                         self.save('current')
 
                     if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                        self.model.eval()
+                        # self.model.eval()
                         '''
                         self.ema.ema_model.eval()
 
@@ -392,15 +392,15 @@ class Trainer(object):
                         '''
                         milestone = self.step // self.save_and_sample_every
                         self.save(milestone)
-                        with torch.no_grad():
-                            if isinstance(self.model, nn.parallel.DistributedDataParallel):
-                                rgbs, *_ = self.model.module.render_img(batch, self.cfg.model.render_kwargs)
-                            else:
-                                rgbs, *_ = self.model.render_img(batch, self.cfg.model.render_kwargs)
-                            for rgb_i in range(len(rgbs)):
-                                tv.utils.save_image(torch.from_numpy(rgbs[rgb_i]).permute(2, 0, 1),
-                                                    str(self.results_folder / f'ckpt-{milestone}-sample-{rgb_i}.png'))
-                        self.model.train()
+                        # with torch.no_grad():
+                        #     if isinstance(self.model, nn.parallel.DistributedDataParallel):
+                        #         rgbs, *_ = self.model.module.render_img(batch, self.cfg.model.render_kwargs)
+                        #     else:
+                        #         rgbs, *_ = self.model.render_img(batch, self.cfg.model.render_kwargs)
+                        #     for rgb_i in range(len(rgbs)):
+                        #         tv.utils.save_image(torch.from_numpy(rgbs[rgb_i]).permute(2, 0, 1),
+                        #                             str(self.results_folder / f'ckpt-{milestone}-sample-{rgb_i}.png'))
+                        # self.model.train()
                 accelerator.wait_for_everyone()
                 pbar.update(1)
 

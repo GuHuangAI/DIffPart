@@ -64,14 +64,14 @@ class NeRF(nn.Module):
         rgbnet_depth = self.cfg.dvgo.rgbnet_depth
 
         # part kwargs
-        self.num_parts = self.cfg.get('num_parts', 8)
+        self.num_parts = self.cfg.get('num_parts', 4)
         self.part_fea_dim = self.cfg.get('part_fea_dim', 128)
-        self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
-        nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        # self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
+        # nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
         # self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
         # self.part_mlp = PartAtt(self.part_fea_dim, self.part_fea_dim, n_layers=4)
         # dim_index = 3 + 3 * viewbase_pe * 2
-        self.index_mlp = IndexMLP(in_dim=self.cfg.dvgo.rgbnet_dim, out_dim=self.part_fea_dim+self.num_parts,
+        self.index_mlp = IndexMLP(in_dim=self.cfg.dvgo.rgbnet_dim, out_dim=self.num_parts+1,
                                   part_dim=self.part_fea_dim, hidden_dim=self.part_fea_dim)
 
         # dim0 += self.part_fea_dim
@@ -99,7 +99,7 @@ class NeRF(nn.Module):
         global_step = kwargs.get('global_step', 0)
         HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss = [
             render_kwargs[k] for k in [
-                'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'images', 'masks'
+                'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'images', 'parts'
             ]
         ]
         loss = 0.
@@ -111,11 +111,14 @@ class NeRF(nn.Module):
         accelerator = kwargs['accelerator']
         opt_nerf = kwargs['opt_nerf']
         joint_learn = kwargs.get('joint_learn', False)
-        part_fea = kwargs.get('part_fea')
+        part_shape_feas = kwargs.get('part_shape_fea')
+        part_text_feas = kwargs.get('part_texture_fea')
+        # part_fea = kwargs.get('part_fea')
         # features = features + self.residual(features)
         loss_weights = kwargs['loss_weight'] if 'loss_weight' in kwargs else torch.ones(len(field),)
-        for dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images, masks, lw in \
-                zip(densities, features, HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss, loss_weights):
+        for dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images, masks, lw, psf, ptf in \
+                zip(densities, features, HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss, loss_weights,
+                    part_shape_feas, part_text_feas):
             device = dens.device
             rgb_tr_ori = images.to(device)
             masks = masks.to(device)
@@ -165,7 +168,8 @@ class NeRF(nn.Module):
                 rays_o = rays_o_tr[sel_b].to(device)
                 rays_d = rays_d_tr[sel_b].to(device)
                 viewdirs = viewdirs_tr[sel_b]
-                render_result = self.render_train(dens, fea, rays_o, rays_d, viewdirs, part_fea, **render_kwarg_train)
+                render_result = self.render_train(dens, fea, rays_o, rays_d, viewdirs,
+                                                  psf, ptf, **render_kwarg_train)
                 loss_main = self.cfg.weight_main * F.mse_loss(render_result['rgb_marched'], target)
                 psnr_cur = -10. * torch.log10(loss_main.detach() / self.cfg.weight_main)
                 # print(psnr_cur)
@@ -176,18 +180,19 @@ class NeRF(nn.Module):
                 rgbper = (render_result['raw_rgb'] - target[render_result['ray_id']]).pow(2).sum(-1)
                 rgbper_loss = (rgbper * render_result['weights'].detach()).sum() / len(rays_o)
                 loss_rgbper = self.cfg.weight_rgbper * rgbper_loss
-                loss_ind_entropy = self.cfg.weight_ind_en * self.loss_entropy(render_result['index'])
+                # loss_ind_entropy = self.cfg.weight_ind_en * self.loss_entropy(render_result['index'])
                 # loss += loss_main + loss_entropy_last + loss_rgbper
                 # torch.cuda.empty_cache()
-                loss += (loss_main + loss_entropy_last + loss_rgbper + loss_ind_entropy) * lw.item()
+                loss += (loss_main + loss_entropy_last + loss_rgbper) * lw.item()
                 loss_part_cons = self.cfg.weight_part_cons * self.loss_part_cons(render_result['feat'], render_result['index'])
                 loss += loss_part_cons * lw.item()
                 if mask_tr is not None:
-                    loss_mask = self.cfg.weight_mask * F.mse_loss(render_result['mask_marched'], target_m)
-                    loss_comparable = self.cfg.weight_comparable * self.loss_comparable(
-                                                    render_result['index'], render_result['ray_id'], target_m)
+                    loss_mask = self.cfg.weight_mask * F.cross_entropy(render_result['part_marched'], target_m)
+                    loss_mask_per = self.cfg.weight_mask_per * F.cross_entropy(render_result['index_pred_rays'], target_m)
+                    # loss_comparable = self.cfg.weight_comparable * self.loss_comparable(
+                    #                                 render_result['index'], render_result['ray_id'], target_m)
                     # loss_coverage = self.cfg.weight_coverage * self.loss_coverage(render_result['index_value'], target_m)
-                    loss += (loss_mask + loss_comparable) * lw.item() # + loss_coverage
+                    loss += (loss_mask + loss_mask_per) * lw.item() # + loss_coverage
                 # loss = loss * lw.item()
                 if not joint_learn:
                     opt_nerf.zero_grad()
@@ -200,12 +205,12 @@ class NeRF(nn.Module):
         loss_dict = {
             'loss_render_main': loss_main.detach().item(),
             'psnr': psnr/bs/inner_iter,
-            'loss_ind_entropy': loss_ind_entropy.detach().item(),
-            'loss_part_cons': loss_part_cons,
+            # 'loss_ind_entropy': loss_ind_entropy.detach().item(),
+            # 'loss_part_cons': loss_part_cons,
         }
         if mask_tr is not None:
             loss_dict['loss_mask'] = loss_mask.detach().item()
-            loss_dict['loss_comparable'] = loss_comparable.detach().item()
+            loss_dict['loss_mask_per'] = loss_mask_per.detach().item()
         #return loss/bs/self.cfg.inner_iter, loss_item/bs/self.cfg.inner_iter, psnr/bs/self.cfg.inner_iter
         return loss / bs / inner_iter, loss_dict
 
@@ -433,7 +438,7 @@ class NeRF(nn.Module):
         shape = density.shape
         return dvgo.Raw2Alpha.apply(density.flatten(), self.act_shift, interval).reshape(shape)
 
-    def render_train(self, dens, fea, rays_o, rays_d, viewdirs, part_fea, **render_kwargs):
+    def render_train(self, dens, fea, rays_o, rays_d, viewdirs, part_shape_fea, part_text_fea, **render_kwargs):
         assert len(rays_o.shape) == 2 and rays_o.shape[-1] == 3, 'Only suuport point queries in [N, 3] format'
         # for fie in field:
         ret_dict = {}
@@ -465,7 +470,7 @@ class NeRF(nn.Module):
             ray_pts = ray_pts[mask]
             ray_id = ray_id[mask]
             step_id = step_id[mask]
-            # density = density[mask]
+            density = density[mask]
             alpha = alpha[mask]
 
         # compute accumulated transmittance
@@ -477,6 +482,7 @@ class NeRF(nn.Module):
             ray_pts = ray_pts[mask]
             ray_id = ray_id[mask]
             step_id = step_id[mask]
+            density = density[mask]
 
         # query for color
         batch = ray_pts.shape[0]
@@ -488,20 +494,32 @@ class NeRF(nn.Module):
         # part_fea = self.part_mlp(self.part_embeddings.weight)
         # index_pred = self.index_mlp(xyz_emb.unsqueeze(1), part_fea[None, ::].repeat(batch, 1, 1)).squeeze(1)
         index_pred = [self.index_mlp(in1, in2) for in1, in2 in zip(k0.unsqueeze(1).split(8192, 0), \
-                                                       part_fea[None, ::].expand(batch, -1, -1).split(8192, 0)
+                                                       part_shape_fea[None, ::].expand(batch, -1, -1).split(8192, 0)
                                                     )]
-        index_pred = torch.cat(index_pred, dim=0).squeeze(1)
-        point_fea = index_pred[:, :self.part_fea_dim]
-        index_pred = index_pred[:, self.part_fea_dim:]
+        index_pred = torch.cat(index_pred, dim=0).squeeze(1) # B, num_parts
+
+        # point_fea = index_pred[:, :self.part_fea_dim]
+        # index_pred = index_pred[:, self.part_fea_dim:]
         # index_value = index_pred[:, -1]
         # index_pred = index_pred[:, :-1]
-        # ind_uniques = torch.unique(ray_id)
+        mlp_idxs = []
+        index_pred_rays = []
+        ind_uniques = torch.unique(ray_id)
+        for i, idx in enumerate(ind_uniques):
+            id_tmp = ray_id == idx
+            dens_ray = density[id_tmp]
+            index_pred_ray = index_pred[id_tmp] # ray_len, num_parts
+            max_point_id = torch.max(dens_ray)[1]
+            max_index_pred_ray = index_pred_ray[max_point_id] # num_parts
+            mlp_idxs.append(torch.max(max_index_pred_ray)[1])
+            index_pred_rays.append(max_index_pred_ray)
+        index_pred_rays = torch.stack(index_pred_rays, dim=0) # N, num_parts
         # index_value_pred = torch.zeros(len(ind_uniques), device=index_pred.device) # N,
         # for i, idx in enumerate(ind_uniques):
         #     id_temp = ray_id == idx
         #     index_value_temp = index_value[id_temp]
         #     index_value_pred[i] = index_value_temp.max()
-        index_mlp = torch.max(index_pred, dim=-1)[1]
+        # index_mlp = torch.max(index_pred, dim=-1)[1]
 
         if self.rgbnets is None:
             # no view-depend effect
@@ -518,15 +536,21 @@ class NeRF(nn.Module):
             viewdirs_emb = viewdirs_emb.flatten(0, -2)[ray_id]
             k0_view = torch.cat([k0_view, viewdirs_emb], -1)
             rgb_feat = [self.feat_mlp(in1, in2) for in1, in2 in zip(k0_view.unsqueeze(1).split(8192, 0), \
-                                                       part_fea[None, ::].expand(batch, -1, -1).split(8192, 0)
+                                                       part_text_fea[None, ::].expand(batch, -1, -1).split(8192, 0)
                                                     )]
             rgb_feat = torch.cat(rgb_feat, dim=0).squeeze(1)
-            rgb_feat = torch.cat([rgb_feat, point_fea], dim=-1)
+            # rgb_feat = torch.cat([rgb_feat, point_fea], dim=-1)
             rgb_logit = torch.zeros(rgb_feat.shape[0], 3, device=rgb_feat.device) - 100
-            for part in range(self.num_parts):
-                part_ind = index_mlp == part
-                if part_ind.sum() > 0:
-                    rgb_logit[part_ind] = self.rgbnets[part](rgb_feat[part_ind])
+            for i, idx_ray in enumerate(ind_uniques):
+                ray_id_tmp = ray_id == idx_ray
+                idx_mlp = mlp_idxs[i]
+                if idx_mlp != 0:
+                    rgb_logit[ray_id_tmp] = self.rgbnets[idx_mlp](rgb_feat[ray_id_tmp])
+            # for part in range(self.num_parts):
+            #     part_ind = index_mlp == part
+            #     if part_ind.sum() > 0:
+            #         rgb_logit[part_ind] = self.rgbnets[part](rgb_feat[part_ind])
+            rgb_logit = self.rgbnets
             if self.cfg.dvgo.rgbnet_direct:
                 rgb = torch.sigmoid(rgb_logit)
             else:
@@ -539,6 +563,13 @@ class NeRF(nn.Module):
             out=torch.zeros([N, 3], device=weights.device),
             reduce='sum')
         rgb_marched += (alphainv_last.unsqueeze(-1) * render_kwargs['bg'])
+
+        part_marched = segment_coo(
+            src=(weights.unsqueeze(-1) * index_pred),
+            index=ray_id,
+            out=torch.zeros([N, self.num_parts], device=weights.device),
+            reduce='sum')
+
         ret_dict.update({
             'alphainv_last': alphainv_last,
             'weights': weights,
@@ -546,9 +577,9 @@ class NeRF(nn.Module):
             'raw_alpha': alpha,
             'raw_rgb': rgb,
             'ray_id': ray_id,
-            # 'index_value': index_value_pred,
+            'index_pred_ray': index_pred_rays, # ray_len, 4
             'index': index_pred,
-            'feat': point_fea,
+            'part_marched': part_marched,
         })
         if render_kwargs.get('render_mask', False):
             mask_marched = segment_coo(
@@ -726,12 +757,13 @@ class IndexMLP(nn.Module):
         self.out_layer = nn.Linear(hidden_dim, out_dim)
 
     def forward(self, x, part_fea):
+        # x: B, 1, 3;    part_fea: B, num_parts, part_fea_dim
         x = self.in_layer(x)
         part_fea = self.in_layer_part(part_fea)
         for hidden_layer in self.hidden_layers:
             x = hidden_layer(x, part_fea)
         x = self.out_layer(self.act(x))
-        return x
+        return x # B, 1, num_parts
 
 class RelateMLP(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_dim=128, part_dim=128, n_layers=3):

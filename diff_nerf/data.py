@@ -285,6 +285,21 @@ def load_blender_data(basedir, half_res=False, sample_num=5, split='train'):
 
     return imgs, poses, [H, W, focal], i_split, depths
 
+def refine_part_chair(part):
+    part_value = part[..., :3]
+    part_mask = part[..., -1:] / 255
+    p_f = part_value * part_mask
+    part_label = np.zeros((800, 800)).astype(np.long)
+    label_1_mask = (p_f[..., 0] < 20) & (p_f[..., 1] < 20) & (p_f[..., 2] >= 200)
+    label_2_mask = (p_f[..., 0] >= 200) & (p_f[..., 1] < 20) & (p_f[..., 2] < 20)
+    label_3_mask = (p_f[..., 0] < 20) & (p_f[..., 1] >= 200) & (p_f[..., 2] < 20)
+    label_4_mask = (p_f[..., 0] >= 200) & (p_f[..., 1] >= 200) & (p_f[..., 2] < 20)
+    part_label[label_1_mask] = 1
+    part_label[label_2_mask] = 2
+    part_label[label_3_mask] = 3
+    part_label[label_4_mask] = 4
+    return part_label
+
 def load_blender_data2(basedir, half_res=False, sample_num=5, split='train'):
     assert split in ['train', 'val', 'test'];
     metas = {}
@@ -315,6 +330,7 @@ def load_blender_data2(basedir, half_res=False, sample_num=5, split='train'):
             fname_p = os.path.join(basedir, frame['file_path'][:-6] + 'parts.png')
             imgs.append(imageio.imread(fname))
             part_label = np.array(Image.open(fname_p))
+            part_label = refine_part_chair(part_label)
             # part_label_tmp = np.array(Image.open(fname_p))[..., :3]
             # h, w = part_label_tmp.shape[:2]
             # part_label_tmp = part_label_tmp.reshape(h*w, 3)
@@ -325,7 +341,8 @@ def load_blender_data2(basedir, half_res=False, sample_num=5, split='train'):
             part_labels.append(part_label)
             poses.append(np.array(frame['transform_matrix']))
         imgs = (np.array(imgs) / 255.).astype(np.float32) # keep all 4 channels (RGBA)
-        part_labels = (np.array(part_labels) / 255.).astype(np.long)
+        # part_labels = (np.array(part_labels) / 255.).astype(np.long)
+        part_labels = (np.array(part_labels)).astype(np.long)
         poses = np.array(poses).astype(np.float32)
         counts.append(counts[-1] + imgs.shape[0])
         all_imgs.append(imgs)
@@ -336,6 +353,7 @@ def load_blender_data2(basedir, half_res=False, sample_num=5, split='train'):
 
     imgs = np.concatenate(all_imgs, 0)
     poses = np.concatenate(all_poses, 0)
+    parts = np.concatenate(all_parts, 0)
 
     H, W = imgs[0].shape[:2]
     camera_angle_x = float(meta['camera_angle_x'])
@@ -349,15 +367,15 @@ def load_blender_data2(basedir, half_res=False, sample_num=5, split='train'):
         focal = focal/2.
 
         imgs_half_res = np.zeros((imgs.shape[0], H, W, 4))
-        parts_half_res = np.zeros((part_labels.shape[0], H, W))
-        for i, (img, dpt) in enumerate(zip(imgs, part_labels)):
+        parts_half_res = np.zeros((parts.shape[0], H, W))
+        for i, (img, dpt) in enumerate(zip(imgs, parts)):
             imgs_half_res[i] = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
             parts_half_res[i] = cv2.resize(dpt, (W, H), interpolation=cv2.NEAREST)
         imgs = imgs_half_res
-        part_labels = parts_half_res
+        parts = parts_half_res
         # imgs = tf.image.resize_area(imgs, [400, 400]).numpy()
 
-    return imgs, poses, [H, W, focal], i_split, part_labels
+    return imgs, poses, [H, W, focal], i_split, parts
 
 
 trans_t = lambda t : torch.Tensor([
@@ -739,6 +757,9 @@ if __name__ == '__main__':
     sd1 = 0
     sd2 = 0
     sd3 = 0
+    mean1 = 0
+    mean2 = 0
+    mean3 = 0
     maxm = -1e5
     minm = 1e5
     for i in range(len(dataset)):
@@ -753,6 +774,9 @@ if __name__ == '__main__':
         sd1 += den[den!=0.].std()
         sd2 += fea[fea!=0.].std()
         sd3 += field.std()
+        mean1 += den[den != 0.].mean()
+        mean2 += fea[fea != 0.].mean()
+        mean3 += field.mean()
     dl = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True,
                     pin_memory=True, num_workers=2, collate_fn=default_collate)
     def cycle(dl):

@@ -1713,8 +1713,8 @@ class AutoencoderKL(nn.Module):
         render_kwargs = inputs["render_kwargs"]
         class_id = inputs["class_id"]
         inputs = inputs['input']
-        inputs[:1] = inputs[:1] / self.std_den
-        inputs[1:] = inputs[1:] / self.std_fea
+        inputs[:, :1] = inputs[:, :1] / self.std_den
+        inputs[:, 1:] = inputs[:, 1:] / self.std_fea
         reconstructions, posterior = self(inputs)
         if 'accelerator' in kwargs:
             accelerator = kwargs['accelerator']
@@ -1831,16 +1831,16 @@ class AutoencoderKL(nn.Module):
             K[:2, :3] /= render_factor
 
         #### model ####
-        input[:1] = input[:1] / self.std_den
-        input[1:] = input[1:] / self.std_fea
+        input[:, :1] = input[:, :1] / self.std_den
+        input[:, 1:] = input[:, 1:] / self.std_fea
         reconstructions, posterior = self(input)
         # cls_logits = self.classifier_conv(reconstructions)
         # cls_logits = self.classifier(cls_logits.view(reconstructions.shape[0], -1))
         # cls_logits = self.classifier(reconstructions)
         # cls_ids = torch.max(cls_logits, 1)[1]
         # reconstructions = max_min_unnormalize(reconstructions * self.std_scale, self.cfg.maxm, self.cfg.minm)
-        reconstructions[:1] = reconstructions[:1] * self.std_den
-        reconstructions[1:] = reconstructions[1:] * self.std_fea
+        reconstructions[:, :1] = reconstructions[:, :1] * self.std_den
+        reconstructions[:, 1:] = reconstructions[:, 1:] * self.std_fea
         # reconstructions.clamp_(-1, 1)
         # reconstructions = reconstructions / (1 - reconstructions.abs())
         if rotate_flag:

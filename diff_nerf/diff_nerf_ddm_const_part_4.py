@@ -720,6 +720,10 @@ class LatentDiffusion(DDPM):
         loss_vlb = loss_vlb.mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
         loss = loss_simple + loss_vlb
+
+        loss += 0.0001 * torch.norm(self.shape_embs.weight, dim=-1).mean()
+        loss += 0.0001 * torch.norm(self.texture_embs.weight, dim=-1).mean()
+
         with torch.no_grad():
             x_rec_dec = self.first_stage_model.decode(x_rec / self.scale_factor)
         # class_id = batch["class_id"]
@@ -1125,6 +1129,7 @@ class SelfAttLayer(nn.Module):
 
 class DecNet(nn.Module):
     def __init__(self, num_parts, part_fea_dim, n_layers=4):
+        super(DecNet, self).__init__()
         self.num_parts = num_parts
         self.part_fea_dim = part_fea_dim
         self.mlp = nn.Linear(part_fea_dim, num_parts * part_fea_dim)
