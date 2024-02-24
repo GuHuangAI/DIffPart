@@ -944,6 +944,7 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def render_img_sample(self, batch_size, render_kwargs, export_mesh=False, **kwargs):
         device = self.device_buffer.device
+        input = kwargs['input']
         H, W, focal = render_kwargs.hwf
         K = np.array([
             [focal, 0, 0.5 * W],
@@ -965,14 +966,16 @@ class LatentDiffusion(DDPM):
             K[:2, :3] /= render_factor
 
         #### model ####
-        idx = random.sample(list(range(200)), batch_size)
+        idx = input['obj_idx']
+        part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx])  # B, num_parts, part_fea_dim
+        part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx])  # B, num_parts, part_fea_dim
         # idx = [10, 40]
         # part_shape_code = 0.5 * self.shape_embs.weight[[10]] + 0.5 * self.shape_embs.weight[[40]]  # B, part_fea_dim
         # part_texture_code = 0.5 * self.texture_embs.weight[[10]] + 0.5 * self.texture_embs.weight[[40]]  # B, part_fea_dim
         # part_shape_fea = self.part_shape_mlp(part_shape_code)  # B, num_parts, part_fea_dim
         # part_texture_fea = self.part_texture_mlp(part_texture_code)  # B, num_parts, part_fea_dim
-        part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx])  # B, num_parts, part_fea_dim
-        part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx])  # B, num_parts, part_fea_dim
+        # part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx])  # B, num_parts, part_fea_dim
+        # part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx])  # B, num_parts, part_fea_dim
         reconstructions = self.sample(batch_size=batch_size, up_scale=1, cond=None, mask=None, device=device, part_shape_fea=part_shape_fea, part_texture_fea=part_texture_fea)
         # try:
         #     cls_logits = self.first_stage_model.classifier(reconstructions)
