@@ -10,7 +10,7 @@ from diff_nerf.utils import *
 import torchvision as tv
 from diff_nerf.encoder_decoder3d import AutoencoderKL
 # from denoising_diffusion_pytorch.data import ImageDataset, CIFAR10
-from diff_nerf.mesh_utils import export_meshes_to_path
+# from diff_nerf.mesh_utils import export_meshes_to_path
 from diff_nerf.data import VolumeDataset, default_collate
 from torch.utils.data import DataLoader
 from multiprocessing import cpu_count
@@ -151,22 +151,27 @@ def main(args):
                 for key in datatmp.keys():
                     if isinstance(datatmp[key], torch.Tensor):
                         datatmp[key] = datatmp[key].to(trainer.accelerator.device)
+                        batch_size = datatmp[key].shape[0]
                         # print(trainer.accelerator.device)
                 if isinstance(trainer.model, nn.parallel.DistributedDataParallel):
-                    rgbss, depthss, bgmapss, meshes, part_mesh_lists = trainer.model.module.render_img_sample(2, nerf_cfg, export_mesh=True,
-                                                                                     input=datatmp['input'])
+                    rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = trainer.model.module.render_img_sample(batch_size, nerf_cfg, export_mesh=False,
+                                                                                     input=datatmp)
                 elif isinstance(trainer.model, nn.Module):
-                    rgbss, depthss, bgmapss, meshes, part_mesh_lists = trainer.model.render_img_sample(2, nerf_cfg, export_mesh=True,
-                                                                              input=datatmp['input'])
+                    rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = trainer.model.render_img_sample(batch_size, nerf_cfg, export_mesh=False,
+                                                                              input=datatmp,
+                                                                                )
                 # all_images = torch.clamp((all_images + 1.0) / 2.0, min=0.0, max=1.0)
             # for i, (mesh, part_mesh_list) in enumerate(zip(meshes, part_mesh_lists)):
             #     export_meshes_to_path(trainer.results_folder / 'mesh' / f'{i}', mesh, part_mesh_list)
             # all_images = torch.cat(all_images_list, dim = 0)
             for j in range(len(rgbss)):
                 rgbs = rgbss[j]
+                parts = partss[j]
                 for rgb_i in range(len(rgbs)):
                     tv.utils.save_image(rgbs[rgb_i],
                         str(trainer.results_folder / f'ckpt-{train_cfg.resume_milestone}-testbefore-{j}-image-{rgb_i}.png'))
+                    tv.utils.save_image(parts[rgb_i],
+                                        str(trainer.results_folder / f'ckpt-{train_cfg.resume_milestone}-testbefore-{j}-part-{rgb_i}.png'))
             # nrow = 2 ** math.floor(math.log2(math.sqrt(data_cfg.batch_size)))
             # tv.utils.save_image(all_images, str(trainer.results_folder / f'sample-{train_cfg.resume_milestone}_{model_cfg.sampling_timesteps}.png'), nrow=nrow)
             torch.cuda.empty_cache()
@@ -330,6 +335,7 @@ class Trainer(object):
                     for key in batch.keys():
                         if isinstance(batch[key], torch.Tensor):
                             batch[key].to(device)
+                            batch_size = batch[key].shape[0]
                     # if self.step == 0 and ga_ind == 0:
                     #     if isinstance(self.model, nn.parallel.DistributedDataParallel):
                     #         self.model.module.on_train_batch_start(batch)
@@ -421,7 +427,7 @@ class Trainer(object):
                     self.ema.to(device)
                     self.ema.update()
 
-                    if self.step % 1000 == 0:
+                    if self.step % 500 == 0:
                         self.save('current')
 
                     if self.step != 0 and self.step % self.save_and_sample_every == 0:
@@ -447,14 +453,17 @@ class Trainer(object):
                         self.save(milestone)
                         with torch.no_grad():
                             if isinstance(self.model, nn.parallel.DistributedDataParallel):
-                                rgbss, depthss, bgmapss = self.model.module.render_img_sample(2, self.cfg.model.nerf)
+                                rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = self.model.module.render_img_sample(batch_size, self.cfg.model.nerf, input=batch)
                             else:
-                                rgbss, depthss, bgmapss = self.model.render_img_sample(2, self.cfg.model.nerf)
+                                rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = self.model.render_img_sample(batch_size, self.cfg.model.nerf, input=batch)
                             for j in range(len(rgbss)):
                                 rgbs = rgbss[j]
+                                parts = partss[j]
                                 for rgb_i in range(len(rgbs)):
                                     tv.utils.save_image(rgbs[rgb_i],
                                                     str(self.results_folder / f'ckpt-{milestone}-sample-{j}-img-{rgb_i}.png'))
+                                    tv.utils.save_image(parts[rgb_i],
+                                                        str(self.results_folder / f'ckpt-{milestone}-sample-{j}-part-{rgb_i}.png'))
                         self.model.train()
                 accelerator.wait_for_everyone()
                 pbar.update(1)

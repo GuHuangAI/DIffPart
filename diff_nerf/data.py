@@ -20,6 +20,7 @@ import random
 import math
 import cv2
 import imageio
+from torchvision import transforms
 np_str_obj_array_pattern = re.compile(r'[SaUO]')
 # angle_list = [0, 45, 90, 135, 180, 225, 270, 315, ] # not 90 * n may generate error reconstruction
 angle_list = [0, 90, 180, 270, ]  # rotate angles
@@ -31,6 +32,13 @@ cls_maps = {
     '03636649': 6, '03991062': 7, '04256520': 8,
     '04379243': 9,
 }
+
+image_transforms = transforms.Compose([
+    transforms.Resize(224),
+    # transforms.ToTensor(),
+    transforms.Normalize(mean=[0.4815, 0.4578, 0.4082],
+                         std=[0.2686, 0.2613, 0.2758])
+])
 
 def draw_density(density, volume_size=64):
     cache_grid_xyz = torch.stack(torch.meshgrid(
@@ -94,9 +102,11 @@ class VolumeDataset(data.Dataset):
         self.normalize = normalize
         # self.cls_names = os.listdir(self.tar_path)
         self.cls_names = cfg.get('cls_names', ['03001627'])
+        select_num = cfg.get("num_objects", 500)
         for cls_name in self.cls_names:
-            self.obj_names[cls_name] = os.listdir(self.tar_path / cls_name)
-            self.obj_total_num += len(os.listdir(self.tar_path / cls_name))
+            self.obj_names[cls_name] = os.listdir(self.tar_path / cls_name)[:select_num]
+            # self.obj_total_num += len(os.listdir(self.tar_path / cls_name))
+            self.obj_total_num += len(self.obj_names[cls_name])
             self.obj_nums.append(self.obj_total_num)
 
         self.load_rgb_net = load_rgb_net
@@ -141,6 +151,8 @@ class VolumeDataset(data.Dataset):
         # density = nn.functional.softsign(density)
         feat = obj_weight['k0.grid'].detach().squeeze(0)
         field = torch.cat([density, feat], dim=0)
+        if self.cfg.get('img_size', None) is not None:
+            field = F.interpolate(field.unsqueeze(0), size=self.cfg.img_size, mode='trilinear')[0]
 
         if self.use_rotate_transform:
             '''
@@ -216,6 +228,8 @@ class VolumeDataset(data.Dataset):
             render_kwargs = load_data2(image_path, sample_num=self.sample_num, white_bkgd=self.white_bkgd,
                                       split=self.split, half_res=self.half_res, data_type=data_type,
                                       load_mask=self.load_mask)
+            res['ref_img'] = render_kwargs['ref_img']
+            render_kwargs.pop('ref_img')
             res['render_kwargs'] = render_kwargs
         return res
 
@@ -330,14 +344,10 @@ def load_blender_data2(basedir, half_res=False, sample_num=5, split='train'):
             fname_p = os.path.join(basedir, frame['file_path'][:-6] + 'parts.png')
             imgs.append(imageio.imread(fname))
             part_label = np.array(Image.open(fname_p))
-            part_label = refine_part_chair(part_label)
-            # part_label_tmp = np.array(Image.open(fname_p))[..., :3]
-            # h, w = part_label_tmp.shape[:2]
-            # part_label_tmp = part_label_tmp.reshape(h*w, 3)
-            # part_label = np.zeros((h, w))
-            # for i in range(h):
-            #     for j in range(w):
-            #         part_label[np.where]
+            part_value = part_label[..., :3]
+            part_mask = part_label[..., -1:] / 255
+            part_label = part_value * part_mask
+            # part_label = refine_part_chair(part_label)
             part_labels.append(part_label)
             poses.append(np.array(frame['transform_matrix']))
         imgs = (np.array(imgs) / 255.).astype(np.float32) # keep all 4 channels (RGBA)
@@ -563,6 +573,12 @@ def load_data2(image_dir, half_res=False, sample_num=5, split='train',
     )
     if load_mask:
         data_dict['masks'] = masks
+    ref_fname = os.path.join(image_dir, 'train', '71_colors.png')
+    ref_img = imageio.imread(ref_fname)
+    ref_img = (np.array(ref_img) / 255.).astype(np.float32)
+    ref_img = ref_img[..., :3] * ref_img[..., -1:] + (1. - ref_img[..., -1:])
+    ref_img = image_transforms(torch.from_numpy(ref_img).permute(2, 0, 1))
+    data_dict['ref_img'] = ref_img
     return data_dict
 
 def generalTransform(image, x_center, y_center, z_center, transform_matrix, method='linear'):
@@ -771,8 +787,8 @@ if __name__ == '__main__':
             minm = field.min()
         den = field[:1, :]
         fea = field[1:, :]
-        sd1 += den[den!=0.].std()
-        sd2 += fea[fea!=0.].std()
+        sd1 += den.std()
+        sd2 += fea.std()
         sd3 += field.std()
         mean1 += den[den != 0.].mean()
         mean2 += fea[fea != 0.].mean()

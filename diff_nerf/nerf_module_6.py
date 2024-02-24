@@ -5,7 +5,7 @@ import numpy as np
 import os
 import math
 import torch.distributions.categorical as cate
-from torch_scatter import segment_coo
+from torch_scatter import segment_coo, segment_csr
 from diff_nerf import dvgo, grid
 from functools import partial
 from torch.utils.cpp_extension import load
@@ -26,7 +26,7 @@ render_utils_cuda = load(
 
 ####   DVGO NeRF  ####
 # Compared to nerf_module: add part shape and part texture features
-# occupancy rendering for part label
+# loss with images not rays
 
 class NeRF(nn.Module):
     def __init__(self, cfg, **kwargs):
@@ -198,12 +198,12 @@ class NeRF(nn.Module):
                     loss_mask = self.cfg.weight_mask * F.cross_entropy(render_result['part_marched'], target_m,
                                                                        ignore_index=0)
                     # loss_mask = 0.
-                    loss_mask_per = self.cfg.weight_mask_per * F.cross_entropy(render_result['index_pred_ray'],
-                                               target_m[render_result['ind_uniques']], ignore_index=0)
+                    # loss_mask_per = self.cfg.weight_mask_per * F.cross_entropy(render_result['index_pred_ray'],
+                    #                            target_m[render_result['ind_uniques']], ignore_index=0)
                     # loss_comparable = self.cfg.weight_comparable * self.loss_comparable(
                     #                                 render_result['index'], render_result['ray_id'], target_m)
                     # loss_coverage = self.cfg.weight_coverage * self.loss_coverage(render_result['index_value'], target_m)
-                    loss += (loss_mask + loss_mask_per) * lw.item() # + loss_coverage
+                    loss += loss_mask * lw.item() # + loss_coverage
                 # loss = loss * lw.item()
                 # t_n3 = time.time()
                 # print(t_n3 - t_n2)
@@ -225,7 +225,7 @@ class NeRF(nn.Module):
         }
         if mask_tr is not None:
             loss_dict['loss_mask'] = loss_mask.detach().item()
-            loss_dict['loss_mask_per'] = loss_mask_per.detach().item()
+            # loss_dict['loss_mask_per'] = loss_mask_per.detach().item()
         #return loss/bs/self.cfg.inner_iter, loss_item/bs/self.cfg.inner_iter, psnr/bs/self.cfg.inner_iter
         return loss / bs / inner_iter, loss_dict
 
@@ -489,7 +489,7 @@ class NeRF(nn.Module):
         ray_pts, ray_id, step_id = self.sample_ray(
             rays_o=rays_o, rays_d=rays_d, **render_kwargs)
         interval = render_kwargs['stepsize'] * self.voxel_size_ratio
-        #print(ray_id)
+        # print(ray_id)
         density = dens
         # print(density.max())
         # skip known free space
@@ -546,67 +546,42 @@ class NeRF(nn.Module):
                                                        part_shape_fea[None, ::].expand(batch, -1, -1).split(8192, 0)
                                                     )]
         index_pred = torch.cat(index_pred, dim=0).squeeze(1) # B, num_parts+1
-
+        # time0 = time.time()
         part_marched = segment_coo(
             src=(weights.unsqueeze(-1) * index_pred),
             index=ray_id,
             out=torch.zeros([N, self.num_parts + 1], device=weights.device),
             reduce='sum')
+        # time1 = time.time()
+        # print(time1 - time0)
+        # max_points = segment_coo(
+        #     src=(weights),
+        #     index=ray_id,
+        #     out=torch.zeros([N], device=weights.device),
+        #     reduce='max')
         mlp_idxs = torch.max(part_marched, dim=-1)[1]
         # time3 = time.time()
         # print(time3 - time2)
-
         ind_uniques, ind_counts = torch.unique(ray_id, return_counts=True)
-        if ray_id.shape[0] > 0:
-            index_pred_split = index_pred.split(list(ind_counts), 0)
-            max_point_len = ind_counts.max()
-            weights_ray_split = weights.split(list(ind_counts), 0)
-            weights_ray_split = [F.pad(drs, pad=(0, max_point_len - drs.shape[0]), value=-100.) \
-                                 for drs in weights_ray_split]
-            weights_ray_split = torch.stack(weights_ray_split, dim=0)  # ray_len, max_point_len
-            max_point_id = torch.max(weights_ray_split, dim=1)[1]
-
-            # mlp_idxs = []
-            # index_pred_rays = []
-            index_pred_split = [F.pad(ips, pad=(0, 0, 0, max_point_len-ips.shape[0]), value=-100.) \
-                                for ips in index_pred_split]
-            index_pred_split = torch.stack(index_pred_split, dim=0) # ray_len, max_point_len, num_parts+1
-            # index_pred_point = index_pred_split[max_point_id]
-            index_gather = max_point_id[..., None, None].expand(-1, -1, index_pred_split.shape[-1])
-            index_pred_point = torch.gather(index_pred_split, dim=1, index=index_gather).squeeze(1)
-        else:
-            index_pred_point = None
-
-        # for i, idx in enumerate(ind_uniques):
-        #     id_tmp = ray_id == idx
-        #     #print(id_tmp.sum())
-        #     if id_tmp.sum() > 1:
-        #         dens_ray = density[id_tmp]
-        #         # print(dens_ray.shape)
-        #         index_pred_ray = index_pred[id_tmp] # ray_len, num_parts+1
-        #         max_point_id = torch.max(dens_ray, dim=-1)[1]
-        #         max_index_pred_ray = index_pred_ray[max_point_id] # num_parts+1
-        #         mlp_idxs.append(torch.max(max_index_pred_ray, dim=-1)[1])
-        #         index_pred_rays.append(max_index_pred_ray)
-        #     else:
-        #         dens_ray = density[id_tmp]
-        #         # print(dens_ray.shape)
-        #         index_pred_ray = index_pred[id_tmp] # 1, num_parts+1
-        #         #max_point_id = torch.max(dens_ray)[1]
-        #         max_index_pred_ray = index_pred_ray[0] # num_parts+1
-        #         mlp_idxs.append(torch.max(max_index_pred_ray, dim=-1)[1])
-        #         index_pred_rays.append(index_pred_ray[0])
-        #print(index_pred_rays)
-        # if len(index_pred_rays) != 0:
-        #     index_pred_rays = torch.stack(index_pred_rays, dim=0) # N, num_parts+1
+        # if ray_id.shape[0] > 0:
+        #     index_pred_split = index_pred.split(list(ind_counts), 0)
+        #     max_point_len = ind_counts.max()
+        #     weights_ray_split = weights.split(list(ind_counts), 0)
+        #     weights_ray_split = [F.pad(drs, pad=(0, max_point_len - drs.shape[0]), value=-100.) \
+        #                          for drs in weights_ray_split]
+        #     weights_ray_split = torch.stack(weights_ray_split, dim=0)  # ray_len, max_point_len
+        #     max_point_id = torch.max(weights_ray_split, dim=1)[1]
+        #
+        #     # mlp_idxs = []
+        #     # index_pred_rays = []
+        #     index_pred_split = [F.pad(ips, pad=(0, 0, 0, max_point_len-ips.shape[0]), value=-100.) \
+        #                         for ips in index_pred_split]
+        #     index_pred_split = torch.stack(index_pred_split, dim=0) # ray_len, max_point_len, num_parts+1
+        #     # index_pred_point = index_pred_split[max_point_id]
+        #     index_gather = max_point_id[..., None, None].expand(-1, -1, index_pred_split.shape[-1])
+        #     index_pred_point = torch.gather(index_pred_split, dim=1, index=index_gather).squeeze(1)
         # else:
-        #     index_pred_rays = torch.zeros(0, self.num_parts+1, device=density.device)
-        # index_value_pred = torch.zeros(len(ind_uniques), device=index_pred.device) # N,
-        # for i, idx in enumerate(ind_uniques):
-        #     id_temp = ray_id == idx
-        #     index_value_temp = index_value[id_temp]
-        #     index_value_pred[i] = index_value_temp.max()
-        # index_mlp = torch.max(index_pred, dim=-1)[1]
+        #     index_pred_point = None
         # time4 = time.time()
         # print(time4 - time3)
         if ray_id.shape[0] > 0:
@@ -674,9 +649,9 @@ class NeRF(nn.Module):
             'raw_alpha': alpha,
             'raw_rgb': rgb,
             'ray_id': ray_id,
-            'index_pred_ray': index_pred_point, # ray_len_unique, num_parts+1
+            # 'index_pred_ray': index_pred_point, # ray_len_unique, num_parts+1
             'index': index_pred,
-            'ind_uniques': ind_uniques,
+            # 'ind_uniques': ind_uniques,
             'part_marched': part_marched, # ray_len, num_parts+1
         })
         if render_kwargs.get('render_mask', False):

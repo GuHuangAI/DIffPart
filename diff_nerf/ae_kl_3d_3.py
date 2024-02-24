@@ -1,4 +1,4 @@
-# naive 3d ae + two different std for density and feature grids
+# pytorch_diffusion + one mlp + multi-scale attention feature grid  + optimizing together + independent loss
 import math
 import time
 import torch
@@ -243,7 +243,7 @@ def nonlinearity(x):
     return x*torch.sigmoid(x)
 
 
-def Normalize(in_channels, num_groups=32):
+def Normalize(in_channels, num_groups=16):
     return torch.nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True)
 
 
@@ -1210,7 +1210,7 @@ class AutoencoderKL(nn.Module):
                  # rgbnet_dim=4,
                  # rgbnet_width=256,
                  # rgbnet_depth=8,
-                 cfg={}, **kwargs,
+                 cfg={}, **kwargs
                  ):
         super().__init__()
         self.image_key = image_key
@@ -1223,58 +1223,57 @@ class AutoencoderKL(nn.Module):
         self.post_quant_conv = torch.nn.Conv3d(embed_dim, ddconfig["z_channels"], 1)
         self.embed_dim = embed_dim
         self.cfg = cfg
-        self.std_den = cfg.get('std_den', 3.8)
-        self.std_fea = cfg.get('std_fea', 1.5)
-        # self.use_render_loss = cfg.get('use_render_loss', False)
-        # self.use_cls_loss = cfg.get('use_cls_loss', False)
-        #
-        # # model kwargs #
-        # self.register_buffer('xyz_min', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_min))
-        # self.register_buffer('xyz_max', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_max))
-        # self.fast_color_thres = self.cfg.render_kwargs.dvgo.fast_color_thres
-        # self.mask_cache_thres = self.cfg.render_kwargs.dvgo.mask_cache_thres
-        #
-        # # determine based grid resolution
-        # self.num_voxels_base = self.cfg.render_kwargs.dvgo.num_voxels_base
-        # self.voxel_size_base = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels_base).pow(1 / 3)
-        #
-        # # determine the density bias shift
-        # self.alpha_init = self.cfg.render_kwargs.dvgo.alpha_init
-        # self.register_buffer('act_shift', torch.FloatTensor([np.log(1 / (1 - self.alpha_init) - 1)]))
-        # self.act_shift -= 4
-        # self.num_voxels = self.cfg.render_kwargs.dvgo.num_voxels
-        # self.voxel_size = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels).pow(1 / 3)
-        # self.world_size = ((self.xyz_max - self.xyz_min) / self.voxel_size).long()
-        # self.voxel_size_ratio = self.voxel_size / self.voxel_size_base
-        #
-        # if colorize_nlabels is not None:
-        #     assert type(colorize_nlabels)==int
-        #     self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
-        # if monitor is not None:
-        #     self.monitor = monitor
-        # viewbase_pe = self.cfg.render_kwargs.dvgo.viewbase_pe
-        # self.register_buffer('viewfreq', torch.FloatTensor([(2 ** i) for i in range(viewbase_pe)]))
-        #
-        # self.residual = MultiScaleAttentionGrid(embed_dim - 1, grid_size=cfg.grid_size)
-        # dim0 = (3 + 3 * viewbase_pe * 2)
-        # if self.cfg.render_kwargs.dvgo.rgbnet_full_implicit:
-        #     pass
-        # elif self.cfg.render_kwargs.dvgo.rgbnet_direct:
-        #     dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim * (1 + len(self.residual.grid_size))
-        # else:
-        #     dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim - 3
-        # rgbnet_width = cfg.render_kwargs.dvgo.rgbnet_width
-        # rgbnet_depth = cfg.render_kwargs.dvgo.rgbnet_depth
-        #
-        # self.rgbnet = nn.Sequential(
-        #     nn.Linear(dim0, rgbnet_width), nn.ReLU(inplace=True),
-        #     *[
-        #         nn.Sequential(nn.Linear(rgbnet_width, rgbnet_width), nn.ReLU(inplace=True))
-        #         for _ in range(rgbnet_depth - 2)
-        #     ],
-        #     nn.Linear(rgbnet_width, 3),
-        # )
-        # nn.init.constant_(self.rgbnet[-1].bias, 0)
+        self.std_scale = cfg.get('std_scale', 1.)
+        self.use_render_loss = cfg.get('use_render_loss', False)
+        self.use_cls_loss = cfg.get('use_cls_loss', False)
+
+        # model kwargs #
+        self.register_buffer('xyz_min', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_min))
+        self.register_buffer('xyz_max', torch.Tensor(self.cfg.render_kwargs.dvgo.xyz_max))
+        self.fast_color_thres = self.cfg.render_kwargs.dvgo.fast_color_thres
+        self.mask_cache_thres = self.cfg.render_kwargs.dvgo.mask_cache_thres
+
+        # determine based grid resolution
+        self.num_voxels_base = self.cfg.render_kwargs.dvgo.num_voxels_base
+        self.voxel_size_base = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels_base).pow(1 / 3)
+
+        # determine the density bias shift
+        self.alpha_init = self.cfg.render_kwargs.dvgo.alpha_init
+        self.register_buffer('act_shift', torch.FloatTensor([np.log(1 / (1 - self.alpha_init) - 1)]))
+        self.act_shift -= 4
+        self.num_voxels = self.cfg.render_kwargs.dvgo.num_voxels
+        self.voxel_size = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels).pow(1 / 3)
+        self.world_size = ((self.xyz_max - self.xyz_min) / self.voxel_size).long()
+        self.voxel_size_ratio = self.voxel_size / self.voxel_size_base
+
+        if colorize_nlabels is not None:
+            assert type(colorize_nlabels)==int
+            self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
+        if monitor is not None:
+            self.monitor = monitor
+        viewbase_pe = self.cfg.render_kwargs.dvgo.viewbase_pe
+        self.register_buffer('viewfreq', torch.FloatTensor([(2 ** i) for i in range(viewbase_pe)]))
+
+        #self.residual = MultiScaleAttentionGrid(embed_dim - 1, grid_size=cfg.grid_size)
+        dim0 = (3 + 3 * viewbase_pe * 2)
+        if self.cfg.render_kwargs.dvgo.rgbnet_full_implicit:
+            pass
+        elif self.cfg.render_kwargs.dvgo.rgbnet_direct:
+            dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim# * (1 + len(self.residual.grid_size))
+        else:
+            dim0 += self.cfg.render_kwargs.dvgo.rgbnet_dim - 3
+        rgbnet_width = cfg.render_kwargs.dvgo.rgbnet_width
+        rgbnet_depth = cfg.render_kwargs.dvgo.rgbnet_depth
+
+        self.rgbnet = nn.Sequential(
+            nn.Linear(dim0, rgbnet_width), nn.ReLU(inplace=True),
+            *[
+                nn.Sequential(nn.Linear(rgbnet_width, rgbnet_width), nn.ReLU(inplace=True))
+                for _ in range(rgbnet_depth - 2)
+            ],
+            nn.Linear(rgbnet_width, 3),
+        )
+        nn.init.constant_(self.rgbnet[-1].bias, 0)
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
 
@@ -1656,8 +1655,8 @@ class AutoencoderKL(nn.Module):
         #     pass
         # else:
         #     k0 = self.k0(ray_pts)
-        # k0 = self.forward_grid(fea, ray_pts)
-        k0 = self.residual(fea, ray_pts)
+        k0 = self.forward_grid(fea, ray_pts)
+        #k0 = self.residual(fea, ray_pts)
 
         if self.rgbnet is None:
             # no view-depend effect
@@ -1712,9 +1711,7 @@ class AutoencoderKL(nn.Module):
         # opt_nerf = kwargs['opt_nerf']
         render_kwargs = inputs["render_kwargs"]
         class_id = inputs["class_id"]
-        inputs = inputs['input']
-        inputs[:, :1] = inputs[:, :1] / self.std_den
-        inputs[:, 1:] = inputs[:, 1:] / self.std_fea
+        inputs = inputs['input'] / self.std_scale
         reconstructions, posterior = self(inputs)
         if 'accelerator' in kwargs:
             accelerator = kwargs['accelerator']
@@ -1739,18 +1736,18 @@ class AutoencoderKL(nn.Module):
                 grid = reconstructions
                 loss_tv = self.total_variation(grid) * self.cfg.render_kwargs.weight_tv
                 aeloss += loss_tv
-            # if self.use_cls_loss and global_step >= self.cfg.get('cls_start', 0):
-            #     cls_loss, cls_loss_item, acc = self.class_loss(reconstructions, class_id)
-            #     aeloss += cls_loss
-            #     log_dict_ae.update({'cls_loss': cls_loss_item, 'acc': acc})
-            # if self.use_render_loss and global_step >= self.cfg.render_start:
-            #     # print(self.cfg.render_start)
-            #     render_loss, render_loss_item, psnr = self.render_loss(
-            #         # max_min_unnormalize(reconstructions * self.std_scale, self.cfg.maxm, self.cfg.minm),
-            #         reconstructions.detach() * self.std_scale,
-            #         render_kwargs, class_id=class_id, accelerator=accelerator, opt_nerf=opt_nerf)
-            #     # aeloss += render_loss
-            #     log_dict_ae.update({'render_loss': render_loss_item, 'psnr': psnr})
+            if self.use_cls_loss and global_step >= self.cfg.get('cls_start', 0):
+                cls_loss, cls_loss_item, acc = self.class_loss(reconstructions, class_id)
+                aeloss += cls_loss
+                log_dict_ae.update({'cls_loss': cls_loss_item, 'acc': acc})
+            if self.use_render_loss and global_step >= self.cfg.render_start:
+                # print(self.cfg.render_start)
+                render_loss, render_loss_item, psnr = self.render_loss(
+                    # max_min_unnormalize(reconstructions * self.std_scale, self.cfg.maxm, self.cfg.minm),
+                    reconstructions.detach() * self.std_scale,
+                    render_kwargs, class_id=class_id, accelerator=accelerator, opt_nerf=opt_nerf)
+                # aeloss += render_loss
+                log_dict_ae.update({'render_loss': render_loss_item, 'psnr': psnr})
             return aeloss, log_dict_ae
 
         if optimizer_idx == 1:
@@ -1831,16 +1828,13 @@ class AutoencoderKL(nn.Module):
             K[:2, :3] /= render_factor
 
         #### model ####
-        input[:, :1] = input[:, :1] / self.std_den
-        input[:, 1:] = input[:, 1:] / self.std_fea
-        reconstructions, posterior = self(input)
+        reconstructions, posterior = self(input / self.std_scale)
         # cls_logits = self.classifier_conv(reconstructions)
         # cls_logits = self.classifier(cls_logits.view(reconstructions.shape[0], -1))
         # cls_logits = self.classifier(reconstructions)
         # cls_ids = torch.max(cls_logits, 1)[1]
         # reconstructions = max_min_unnormalize(reconstructions * self.std_scale, self.cfg.maxm, self.cfg.minm)
-        reconstructions[:, :1] = reconstructions[:, :1] * self.std_den
-        reconstructions[:, 1:] = reconstructions[:, 1:] * self.std_fea
+        reconstructions = reconstructions * self.std_scale
         # reconstructions.clamp_(-1, 1)
         # reconstructions = reconstructions / (1 - reconstructions.abs())
         if rotate_flag:
@@ -1939,11 +1933,8 @@ class AutoencoderKL(nn.Module):
             K[:2, :3] /= render_factor
 
         #### model ####
-        input[:1] = input[:1] / self.std_den
-        input[1:] = input[1:] / self.std_fea
-        reconstructions, posterior = self(input)
-        reconstructions[:1] = reconstructions[:1] * self.std_den
-        reconstructions[1:] = reconstructions[1:] * self.std_fea
+        reconstructions, posterior = self(input / self.std_scale)
+        reconstructions = reconstructions * self.std_scale
         # reconstructions.clamp_(-1, 1)
         # reconstructions = reconstructions / (1 - reconstructions.abs())
         if rotate_flag:

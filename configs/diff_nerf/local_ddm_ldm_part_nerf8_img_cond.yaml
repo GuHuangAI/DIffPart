@@ -1,0 +1,187 @@
+model:
+  class_name: diff_nerf.diff_nerf_ddm_const_part_6.LatentDiffusion
+  num_parts: 4
+  part_fea_dim: 128
+  image_size: [ 96, 96, 96 ]
+  std_scale: 3.5
+  ckpt_path:
+  ignore_keys: [ ]
+  only_model: False
+  timesteps: 1000
+  train_sample: -1
+  sampling_timesteps: 20
+  loss_type: l2
+  use_l1: False
+  objective: pred_KC
+  start_dist: normal
+  perceptual_weight: 0
+  scale_factor: 0.3
+  scale_by_std: True
+#  scale_factor: 0.4
+  default_scale: True
+#  scale_by_softsign: False
+  eps: !!float 1e-3
+  weighting_loss: True
+  use_render_loss: True
+  render_start: 30000
+  joint_step: 50000
+  nerf:
+    class_name: diff_nerf.nerf_module_8.NeRF
+    num_parts: 4
+    part_fea_dim: 128
+    maskcache_sampling_step: 50000
+    hwf: [ 800, 800, 1111.1113654242622 ]  # default hwf
+    near: 2
+    far: 4
+    ndc: False
+    render_factor: 0
+    inverse_y: False
+    flip_x: False
+    flip_y: False
+    stepsize: 0.5
+    bg: 1
+    render_depth: False
+    render_mask: False
+    rotate_flag: False
+    N_rand: 8192
+    inner_iter: 2
+    inner_iter_indep: 50
+    weight_main: 1. # 1 default
+    weight_entropy_last: 0.001 # 0.001 default
+    weight_rgbper: 0.01 # 0.01 default
+    weight_tv: !!float 1e-7
+    weight_cls: 0.1
+    weight_mask: 0.2
+    weight_mask_per: 0.02
+    weight_ind_en: 0.01
+    weight_comparable: 0.0001
+    weight_part_cons: 0.01
+    dvgo:
+      xyz_min: [ -1, -1, -1 ]  # default
+      xyz_max: [ 1, 1, 1 ]
+      num_voxels: 884736
+      num_voxels_base: 884736
+      alpha_init: 0.01
+      fast_color_thres: 0.0001
+      mask_cache_thres: 0.001
+      rgbnet_dim: 5
+      viewbase_pe: 4
+      rgbnet_direct: True
+      rgbnet_full_implicit: False
+      rgbnet_depth: 8
+      rgbnet_width: 128
+  first_stage:
+    class_name: diff_nerf.ae_kl_3d_3.AutoencoderKL
+    embed_dim: 6
+    std_scale: 3.5
+    use_render_loss: False
+    use_cls_loss: False
+    cls_start: 10000
+    cls_path:
+    render_start: 20000
+    maxm: 191.3546
+    minm: -258.9259
+    lossconfig:
+      disc_start: 80001
+      kl_weight: 0.000001
+      disc_weight: 0.5
+      perceptual_weight: 0
+      disc_in_channels: 6
+      disc_num_layers: 3
+    ddconfig:
+      double_z: True
+      z_channels: 8
+      resolution: [ 96, 96, 96 ]
+      in_channels: 6
+      out_ch: 6
+      ch: 80
+      groups: 1
+      ch_mult: [ 1, 2, 4 ]  # num_down = len(ch_mult)-1
+      num_res_blocks: 2
+      attn_resolutions: [ ]
+      dropout: 0.0
+    render_kwargs:
+      hwf: [ 800, 800, 1111.1113654242622 ]  # default hwf
+      near: 2
+      far: 4
+      ndc: False
+      render_factor: 0
+      inverse_y: False
+      flip_x: False
+      flip_y: False
+      stepsize: 0.25
+      bg: 1
+      render_depth: False
+      rotate_flag: False
+      N_rand: 8192
+      inner_iter: 50
+      weight_main: 3. # 1 default
+      weight_entropy_last: 0.003 # 0.001 default
+      weight_rgbper: 0.03 # 0.01 default
+      weight_tv: !!float 1e-6
+      weight_cls: 0.1
+      dvgo:
+        xyz_min: [ -1, -1, -1 ]  # default
+        xyz_max: [ 1, 1, 1 ]
+        num_voxels: 262144
+        num_voxels_base: 262144
+        alpha_init: 0.01
+        fast_color_thres: 0.0001
+        mask_cache_thres: 0.001
+        rgbnet_dim: 4
+        viewbase_pe: 4
+        rgbnet_direct: True
+        rgbnet_full_implicit: False
+        rgbnet_depth: 1
+        rgbnet_width: 128
+    ckpt_path: "/media/huang/T7/data/diff_nerf/ae_kl_d4_96_2/model-14.pt"
+    # ckpt_path: '/media/huang/ZX3 512G/data/diff_nerf/result_ae_kl_128x128x128_d4/model-20.pt'
+
+  unet:
+    class_name: diff_nerf.part_cond_3dunet_sb5.Unet3D
+    dim: 96
+    part_dim: 128
+    dim_mults: [1, 2, 4]
+    channels: 6
+    resnet_block_groups: 8
+    heads: 8
+    learned_sinusoidal_dim: 16
+    window_size_q: [[8, 8, 8], [4, 4, 4], [2, 2, 2], [2, 2, 2]]
+    window_size_k: [[[8, 8, 8], [4, 4, 4], [2, 2, 2]],
+                    [[4, 4, 4], [2, 2, 2]],
+                    [[2, 2, 2], [1, 1, 1]],
+                    [[2, 2, 2], [1, 1, 1]]]
+    out_mul: 1
+
+data:
+  class_name: diff_nerf.data.VolumeDataset
+  data_type: 'blender'
+  tar_path: '/media/huang/T7/data/diff_nerf/Vox_96_ShapeNet_v1'
+  image_path: '/media/huang/T7/data/diff_nerf/ShapeNet_v1_Part_Data'
+  load_rgb_net: False
+  load_mask_cache: False
+  use_rotate_transform: False
+  batch_size: 1
+  white_bkgd: True
+  load_render_kwargs: True
+  load_mask: False
+  sample_num: 5
+  normalize: False
+  num_objects: 300
+#  img_size: [64, 64, 64]
+
+trainer:
+  gradient_accumulate_every: 8  # not true gradient_accumulate_every, but used for optimize g and d alternately
+  lr: !!float 5e-5
+  min_lr: !!float 1e-5
+  train_num_steps: 200000
+  save_and_sample_every: 10000
+  log_freq: 500
+#  results_folder: '/media/huang/T7/data/diff_nerf/result_ae_kl_64x64x64_d4_mlp3_non_normalize_non_cls'
+  results_folder: '/media/huang/T7/data/diff_nerf/result_uncond_ddm_ldm_part_nerf8_img_cond'
+  amp: False
+  fp16: False
+  test_before: True
+  resume_milestone: current
+  ema_update_after_step: 10000
+  ema_update_every: 8

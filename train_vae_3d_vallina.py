@@ -210,8 +210,8 @@ class Trainer(object):
             'lr_scheduler_ae': self.lr_scheduler_ae.state_dict(),
             'opt_disc': self.opt_disc.state_dict(),
             'lr_scheduler_disc': self.lr_scheduler_disc.state_dict(),
-            'opt_nerf': self.opt_nerf.state_dict(),
-            'lr_scheduler_nerf': self.lr_scheduler_nerf.state_dict(),
+            #'opt_nerf': self.opt_nerf.state_dict(),
+            #'lr_scheduler_nerf': self.lr_scheduler_nerf.state_dict(),
             'ema': self.ema.state_dict(),
             'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None
         }
@@ -372,7 +372,7 @@ class Trainer(object):
                         self.save('current')
 
                     if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                        # self.model.eval()
+                        #self.model.eval()
                         '''
                         self.ema.ema_model.eval()
 
@@ -393,13 +393,13 @@ class Trainer(object):
                         milestone = self.step // self.save_and_sample_every
                         self.save(milestone)
                         # with torch.no_grad():
-                        #     if isinstance(self.model, nn.parallel.DistributedDataParallel):
-                        #         rgbs, *_ = self.model.module.render_img(batch, self.cfg.model.render_kwargs)
-                        #     else:
-                        #         rgbs, *_ = self.model.render_img(batch, self.cfg.model.render_kwargs)
-                        #     for rgb_i in range(len(rgbs)):
-                        #         tv.utils.save_image(torch.from_numpy(rgbs[rgb_i]).permute(2, 0, 1),
-                        #                             str(self.results_folder / f'ckpt-{milestone}-sample-{rgb_i}.png'))
+                        #    if isinstance(self.model, nn.parallel.DistributedDataParallel):
+                        #        rgbs, *_ = self.model.module.render_img(batch, self.cfg.model.render_kwargs)
+                        #    else:
+                        #        rgbs, *_ = self.model.render_img(batch, self.cfg.model.render_kwargs)
+                        #    for rgb_i in range(len(rgbs)):
+                        #        tv.utils.save_image(torch.from_numpy(rgbs[rgb_i]).permute(2, 0, 1),
+                        #                            str(self.results_folder / f'ckpt-{milestone}-sample-{rgb_i}.png'))
                         # self.model.train()
                 accelerator.wait_for_everyone()
                 pbar.update(1)

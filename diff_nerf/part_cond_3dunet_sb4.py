@@ -5,9 +5,12 @@ import torch.nn.functional as F
 from einops import rearrange, reduce
 from functools import partial
 import numpy as np
+from .swin_transformer import Swin_S_Weights, swin_s
+from torchvision import transforms
 
 ### uncond 3d unet for single branch ###
 ### use part feature as condition
+### image condition use swin
 
 def exists(x):
     return x is not None
@@ -384,7 +387,7 @@ class CondAttention(nn.Module): # Multi-Scale Window-Attention
 
     def forward(self, x, cond):
         # x: B, C, X, Y, Z
-        # cond: num_parts, C
+        # cond: B, num_parts, C
         #print(cond.shape)
         B, C, X, Y, Z = x.shape
         shortcut = x
@@ -498,6 +501,7 @@ class Unet3D(nn.Module):
         window_size_q=[8, 8, 8],
         window_size_k=[[8, 8, 8], [4, 4, 4], [2, 2, 2]],
         out_mul=1,
+        cond_net='ViT-B/32',
     ):
         super().__init__()
 
@@ -535,6 +539,13 @@ class Unet3D(nn.Module):
             nn.GELU(),
             nn.Linear(time_dim, time_dim)
         )
+        # self.clip, _ = clip.load(cond_net, device='cpu')
+        # self.prepro = transforms.Compose([
+        #     transforms.Resize(size=224),
+        #     transforms.Normalize(mean=[0.4815, 0.4578, 0.4082],
+        #                          std=[0.2686, 0.2613, 0.2758])
+        # ])
+        self.img_encoder = swin_s(weights=Swin_S_Weights)
 
         # cond embedding
         self.cond_mlps = nn.ModuleList([])
@@ -543,8 +554,19 @@ class Unet3D(nn.Module):
         self.cond_mlps.append(nn.Linear(part_dim*2, dims[2]))
         self.cond_mlps.append(nn.Linear(part_dim*2, dims[3]))
 
-        # layers
+        # image embedding
+        self.projects = nn.ModuleList([])
+        f_condnet = 96
+        self.projects.append(nn.Sequential(nn.AdaptiveAvgPool2d((16, 16)),
+            nn.Conv2d(f_condnet, dims[0], 1)))
+        self.projects.append(nn.Sequential(nn.AdaptiveAvgPool2d((8, 8)),
+                                           nn.Conv2d(f_condnet*2, dims[1], 1)))
+        self.projects.append(nn.Sequential(nn.AdaptiveAvgPool2d((4, 4)),
+                                           nn.Conv2d(f_condnet*4, dims[2], 1)))
+        self.projects.append(nn.Sequential(nn.AdaptiveAvgPool2d((2, 2)),
+                                           nn.Conv2d(f_condnet*8, dims[3], 1)))
 
+        # layers
         self.downs = nn.ModuleList([])
         self.relations_down = nn.ModuleList([])
         self.ups = nn.ModuleList([])
@@ -614,7 +636,8 @@ class Unet3D(nn.Module):
         # self.final_res_block2 = block_klass(dim * 2, dim, time_emb_dim=time_dim)
         # self.final_conv2 = nn.Conv3d(dim, self.out_dim, 1)
 
-    def forward(self, x, time, cond1=None, cond2=None, *args, **kwargs):
+    def forward(self, x, time, cond1=None, cond2=None, image=None, *args, **kwargs):
+        bs = x.shape[0]
         sigma = time.reshape(-1, 1, 1, 1, 1)
         # c_skip1 = 1 - sigma
         # c_skip2 = torch.sqrt(sigma)
@@ -633,6 +656,10 @@ class Unet3D(nn.Module):
         part_embs = []
         for i, layer in enumerate(self.cond_mlps):
             part_embs.append(layer(cond))
+        img_emb = self.img_encoder(image)
+        img_embs = []
+        for i, layer in enumerate(self.projects):
+            img_embs.append(rearrange(layer(img_emb[i]), 'b c h w -> b (h w) c'))
 
         h = []
         # h2 = []
@@ -642,7 +669,7 @@ class Unet3D(nn.Module):
             x = block1(x, t)
             h.append(x)
             # h2.append(x.clone())
-            x = relation_layer(x, part_embs[i])
+            x = relation_layer(x, torch.cat([part_embs[i], img_embs[i]], dim=1))
             x = block2(x, t)
             x = attn(x)
             h.append(x)
@@ -660,7 +687,7 @@ class Unet3D(nn.Module):
         for (block1, block2, attn, upsample), relation_layer in zip(self.ups, self.relations_up):
             x = torch.cat((x, h.pop()), dim = 1)
             x = block1(x, t)
-            x = relation_layer(x, part_embs.pop())
+            x = relation_layer(x, torch.cat([part_embs.pop(), img_embs.pop()], dim=1))
             x = torch.cat((x, h.pop()), dim = 1)
             x = block2(x, t)
             x = attn(x)
@@ -704,7 +731,7 @@ if __name__ == '__main__':
                                   [[1, 1, 1]],])
     x = torch.rand(2, 3, 16, 16, 16)
     time = torch.tensor([0.2567, 0.5284])
-    cond = torch.rand(4, 128)
+    cond = torch.rand(2, 4, 128)
     with torch.no_grad():
         y = model(x, time, cond)
         pass
