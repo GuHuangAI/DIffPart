@@ -1,5 +1,5 @@
 model:
-  class_name: diff_nerf.diff_nerf_ddm_const_part_6.LatentDiffusion
+  class_name: diff_nerf.diff_nerf_ddm_const_part_4.LatentDiffusion
   num_parts: 4
   part_fea_dim: 128
   image_size: [ 96, 96, 96 ]
@@ -20,16 +20,16 @@ model:
 #  scale_factor: 0.4
   default_scale: True
 #  scale_by_softsign: False
-  eps: !!float 1e-4
+  eps: !!float 1e-3
   weighting_loss: True
   use_render_loss: True
-  render_start: 30000
-  joint_step: 50000
+  render_start: 25000
+  joint_step: 45000
   nerf:
-    class_name: diff_nerf.nerf_module_8.NeRF
+    class_name: diff_nerf.nerf_module_7.NeRF
     num_parts: 4
     part_fea_dim: 128
-    maskcache_sampling_step: 50000
+    maskcache_sampling_step: 45000
     hwf: [ 800, 800, 1111.1113654242622 ]  # default hwf
     near: 2
     far: 4
@@ -134,11 +134,11 @@ model:
         rgbnet_full_implicit: False
         rgbnet_depth: 1
         rgbnet_width: 128
-    ckpt_path: "/data/huang/diff_nerf/result_ae_kl_d4_96_all/model-15.pt"
+    ckpt_path: "/media/huang/T7/data/diff_nerf/result_ae_kl_d4_96_one_std_table/model-17.pt"
     # ckpt_path: '/media/huang/ZX3 512G/data/diff_nerf/result_ae_kl_128x128x128_d4/model-20.pt'
 
   unet:
-    class_name: diff_nerf.part_cond_3dunet_sb3.Unet3D
+    class_name: diff_nerf.part_cond_3dunet_sb2.Unet3D
     dim: 96
     part_dim: 128
     dim_mults: [1, 2, 4]
@@ -156,8 +156,8 @@ model:
 data:
   class_name: diff_nerf.data.VolumeDataset
   data_type: 'blender'
-  tar_path: '/data/huang/diff_nerf/Vox_96_ShapeNet_v1'
-  image_path: '/data/huang/diff_nerf/ShapeNet_v1_Part_Data'
+  tar_path: '/media/huang/T7/data/diff_nerf/Vox_96_ShapeNet_v1'
+  image_path: '/media/huang/T7/data/diff_nerf/ShapeNet_v1_Part_Data'
   load_rgb_net: False
   load_mask_cache: False
   use_rotate_transform: False
@@ -167,9 +167,9 @@ data:
   load_mask: False
   sample_num: 5
   normalize: False
+  cls_names: ['02691156', ]
   num_objects: 500
-  cls_names: [ '04379243', ]
-  # img_size: [64, 64, 64]
+#  img_size: [64, 64, 64]
 
 trainer:
   gradient_accumulate_every: 8  # not true gradient_accumulate_every, but used for optimize g and d alternately
@@ -179,7 +179,8 @@ trainer:
   save_and_sample_every: 10000
   log_freq: 500
 #  results_folder: '/media/huang/T7/data/diff_nerf/result_ae_kl_64x64x64_d4_mlp3_non_normalize_non_cls'
-  results_folder: '/data/huang/diff_nerf/result_uncond_ddm_ldm_part_nerf8_img_cond_table'
+  results_folder: '/media/huang/T7/data/diff_nerf/result_uncond_ddm_ldm_part_nerf7_plain'
+  test_folder: '/media/huang/T7/data/diff_nerf/result_uncond_ddm_ldm_part_nerf7_plain'
   amp: False
   fp16: False
   test_before: True

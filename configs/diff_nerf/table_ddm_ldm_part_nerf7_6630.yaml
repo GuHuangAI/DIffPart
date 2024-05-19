@@ -167,7 +167,8 @@ data:
   load_mask: False
   sample_num: 5
   normalize: False
-  num_objects: 200
+  num_objects: 500
+  cls_names: [ '04379243', ]
 #  img_size: [64, 64, 64]
 
 trainer:

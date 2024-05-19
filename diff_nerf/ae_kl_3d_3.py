@@ -1709,8 +1709,8 @@ class AutoencoderKL(nn.Module):
     def training_step(self, inputs, optimizer_idx, global_step, **kwargs):
         # inputs = self.get_input(batch, self.image_key)
         # opt_nerf = kwargs['opt_nerf']
-        render_kwargs = inputs["render_kwargs"]
-        class_id = inputs["class_id"]
+        # render_kwargs = inputs["render_kwargs"]
+        # class_id = inputs["class_id"]
         inputs = inputs['input'] / self.std_scale
         reconstructions, posterior = self(inputs)
         if 'accelerator' in kwargs:

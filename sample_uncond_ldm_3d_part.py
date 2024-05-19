@@ -143,6 +143,30 @@ def main(args):
         amp=train_cfg['amp'], fp16=train_cfg.fp16, log_freq=train_cfg.log_freq, cfg=cfg,
         resume_milestone=train_cfg.get('resume_milestone', 0),
     )
+    idx = range(200, 400)
+    save_folder = Path('/media/huang/T7/data/diff_nerf/sample_chair_dpm')
+    save_folder.mkdir(exist_ok=True)
+    (save_folder/'img').mkdir(exist_ok=True)
+    (save_folder / 'part').mkdir(exist_ok=True)
+    if trainer.accelerator.is_main_process:
+        with torch.no_grad():
+            for datatmp in dl:
+                break
+            for key in datatmp.keys():
+                if isinstance(datatmp[key], torch.Tensor):
+                    datatmp[key] = datatmp[key].to(trainer.accelerator.device)
+            if isinstance(trainer.model, nn.parallel.DistributedDataParallel):
+                trainer.model.module.render_img_sample_lopp(
+                    idx, nerf_cfg, save_folder, export_mesh=False,
+                    input=datatmp)
+            elif isinstance(trainer.model, nn.Module):
+                trainer.model.render_img_sample_lopp(idx,
+                                                   nerf_cfg,
+                                                   save_folder,
+                                                   export_mesh=False,
+                                                   input=datatmp,
+                                                   )
+    '''
     if train_cfg.test_before:
         if trainer.accelerator.is_main_process:
             with torch.no_grad():
@@ -176,6 +200,7 @@ def main(args):
             # tv.utils.save_image(all_images, str(trainer.results_folder / f'sample-{train_cfg.resume_milestone}_{model_cfg.sampling_timesteps}.png'), nrow=nrow)
             torch.cuda.empty_cache()
     trainer.train()
+    '''
 
 class Trainer(object):
     def __init__(
@@ -244,7 +269,7 @@ class Trainer(object):
                                      lr=train_lr, weight_decay=cfg.trainer.get('train_wd', 1e-2))
         self.opt_v = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.nerf.parameters()),
                                      lr=train_lr*5, weight_decay=cfg.trainer.get('train_wd', 1e-2))
-        lr_lambda = lambda iter: max((1 - iter / train_num_steps) ** 0.95, 0.1)
+        lr_lambda = lambda iter: max((1 - iter / train_num_steps) ** 0.95, cfg.trainer.min_lr)
         self.lr_scheduler_d = torch.optim.lr_scheduler.LambdaLR(self.opt_d, lr_lambda=lr_lambda)
         self.lr_scheduler_v = torch.optim.lr_scheduler.LambdaLR(self.opt_v, lr_lambda=lr_lambda)
         # for logging results in a folder periodically
@@ -314,7 +339,7 @@ class Trainer(object):
         self.opt_v.load_state_dict(data['opt_v'])
         self.lr_scheduler_v.load_state_dict(data['lr_scheduler_v'])
         if self.accelerator.is_main_process:
-            self.ema.load_state_dict(data['ema'], strict=False)
+            self.ema.load_state_dict(data['ema'])
 
         if exists(self.accelerator.scaler) and exists(data['scaler']):
             self.accelerator.scaler.load_state_dict(data['scaler'])

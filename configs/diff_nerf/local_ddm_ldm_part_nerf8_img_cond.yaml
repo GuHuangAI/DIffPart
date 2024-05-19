@@ -161,7 +161,7 @@ data:
   load_rgb_net: False
   load_mask_cache: False
   use_rotate_transform: False
-  batch_size: 1
+  batch_size: 2
   white_bkgd: True
   load_render_kwargs: True
   load_mask: False
@@ -179,6 +179,7 @@ trainer:
   log_freq: 500
 #  results_folder: '/media/huang/T7/data/diff_nerf/result_ae_kl_64x64x64_d4_mlp3_non_normalize_non_cls'
   results_folder: '/media/huang/T7/data/diff_nerf/result_uncond_ddm_ldm_part_nerf8_img_cond'
+  test_folder: '/media/huang/T7/data/diff_nerf/result_uncond_ddm_ldm_part_nerf8_img_cond'
   amp: False
   fp16: False
   test_before: True

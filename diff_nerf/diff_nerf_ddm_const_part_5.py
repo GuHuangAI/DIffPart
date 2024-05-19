@@ -1037,12 +1037,21 @@ class LatentDiffusion(DDPM):
                 bgmap = render_result['alphainv_last'].permute(2, 0, 1)
                 part = render_result['part_marched'].permute(2, 0, 1)
                 part = torch.argmax(part, dim=0, keepdim=True).to(torch.float)
-                part[part == 4] = 1.
-                part[part == 3] = 0.75
-                part[part == 2] = 0.5
-                part[part == 1] = 0.25
-                part[part == 0] = 0.
-                parts.append(part)
+                colors = torch.Tensor([
+                    [1, 1, 1],  #
+                    [0, 0, 1],  #
+                    [1, 0, 0],  #
+                    [0, 1, 0],  #
+                    [1, 1, 0]
+                    # Add more colors for other classes as needed
+                ])
+                part_rgb = torch.ones((part.shape[1], part.shape[2], 3))
+                # part = part_rgb.expand(3, part.shape[0], part.shape[1])
+                for i in range(len(colors)):
+                    mask = torch.all(part == i, dim=0)
+                    # mask = part == i
+                    part_rgb[mask] = colors[i]
+                parts.append(part_rgb.permute(2, 0, 1))
                 rgbs.append(rgb)
                 bgmaps.append(bgmap)
             rgbss.append(rgbs)
