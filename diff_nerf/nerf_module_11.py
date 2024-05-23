@@ -26,8 +26,10 @@ render_utils_cuda = load(
         verbose=True)
 
 ####   DVGO NeRF  ####
-# Compared to nerf_module: add part shape and part texture features
+# Compared to nerf_module: remove part shape and part texture features
+# part code in diffusion and texture embedding in nerf
 # loss with rays, part dense grid, only one mlp
+# cross- and self-attention
 
 class NeRF(nn.Module):
     def __init__(self, cfg, **kwargs):
@@ -56,6 +58,7 @@ class NeRF(nn.Module):
         self.register_buffer('viewfreq', torch.FloatTensor([(2 ** i) for i in range(viewbase_pe)]))
         self.use_barf_pe = self.cfg.dvgo.get('use_barf_pe', False)
         # self.residual = MultiScaleAttentionGrid(embed_dim - 1, grid_size=cfg.grid_size)
+        pos_dim = (3 + 3 * viewbase_pe * 2)
         dim0 = (3 + 3 * viewbase_pe * 2)
         if self.cfg.dvgo.rgbnet_full_implicit:
             pass
@@ -69,6 +72,12 @@ class NeRF(nn.Module):
         # part kwargs
         self.num_parts = self.cfg.get('num_parts', 4)
         self.part_fea_dim = self.cfg.get('part_fea_dim', 128)
+        # self.part_code = nn.Embedding(self.num_parts, self.part_fea_dim)
+        self.texture_embs = nn.Embedding(cfg.get("num_shape", 500), self.part_fea_dim)
+        nn.init.normal_(self.texture_embs.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        # nn.init.normal_(self.part_code.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        # self.part_att = PartAtt(in_dim=self.part_fea_dim)
+        self.texture_dec = DecNet(4, self.part_fea_dim, n_layers=3)
         # self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
         # nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
         # self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
@@ -76,13 +85,18 @@ class NeRF(nn.Module):
         # dim_index = 3 + 3 * viewbase_pe * 2
         self.index_conv = IndexConvMSWA(in_dim=self.cfg.dvgo.rgbnet_dim+1,
                                     part_dim=self.part_fea_dim,
-                                    hidden_dim=64)
+                                    hidden_dim=64,
+                                    win_size=[8, 8, 8])
+        self.index_conv2 = IndexConvMSWA2(in_dim=64,
+                                        part_dim=self.part_fea_dim,
+                                        hidden_dim=64,
+                                        win_size=[8, 8, 8])
         self.index_mlp = IndexMLP(in_dim=64, out_dim=self.num_parts+1,
                                   part_dim=self.part_fea_dim, hidden_dim=64, n_layers=4)
 
         # dim0 += self.part_fea_dim
-        self.feat_mlp = RelateMLP(in_dim=dim0, out_dim=self.part_fea_dim,
-                                  part_dim=self.part_fea_dim, n_layers=4)
+        self.feat_mlp = RelateMLP(in_dim=pos_dim+64, out_dim=self.part_fea_dim,
+                                  part_dim=self.part_fea_dim, n_layers=3)
         self.rgbnet = nn.Sequential(
                 nn.Linear(self.part_fea_dim, rgbnet_width), nn.ReLU(inplace=True),
                 *[
@@ -128,14 +142,15 @@ class NeRF(nn.Module):
         accelerator = kwargs['accelerator']
         opt_nerf = kwargs['opt_nerf']
         joint_learn = kwargs.get('joint_learn', False)
-        part_shape_feas = kwargs.get('part_shape_fea')
-        part_text_feas = kwargs.get('part_texture_fea')
-        # part_fea = kwargs.get('part_fea')
+        idxs = kwargs.get('idx')
+        part_fea = kwargs['part_fea']
+        # part_shape_feas = kwargs.get('part_shape_fea')
+        # part_text_feas = kwargs.get('part_texture_fea')
+        # part_code = kwargs.get('part_code')
         # features = features + self.residual(features)
         loss_weights = kwargs['loss_weight'] if 'loss_weight' in kwargs else torch.ones(len(field),)
-        for dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images, masks, lw, psf, ptf in \
-                zip(densities, features, HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss, loss_weights,
-                    part_shape_feas, part_text_feas):
+        for dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images, masks, lw, idx, pf in \
+                zip(densities, features, HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss, loss_weights, idxs, part_fea):
             device = dens.device
             rgb_tr_ori = images.to(device)
             masks = masks.to(device)
@@ -189,8 +204,8 @@ class NeRF(nn.Module):
 
                 # t_n = time.time()
                 # print(t_n - t_cur)
-                render_result = self.render_train(dens, fea, rays_o, rays_d, viewdirs,
-                                                  psf, ptf, **render_kwarg_train)
+                render_result = self.render_train(dens, fea, rays_o, rays_d, viewdirs, idx, pf,
+                                                **render_kwarg_train)
                 # t_n2 = time.time()
                 # print(t_n2 - t_n)
                 loss_main = self.cfg.weight_main * F.mse_loss(render_result['rgb_marched'], target)
@@ -496,6 +511,7 @@ class NeRF(nn.Module):
 
     def get_part_index(self, dens, fea, ray_pts, part_fea, chunk_size=8192):
         fea_ind = self.index_conv(torch.cat([dens, fea], dim=0), part_fea)
+        fea_ind = self.index_conv2(fea_ind)
         k1 = self.forward_grid(fea_ind, ray_pts)
         batch = ray_pts.shape[0]
         if chunk_size > 0:
@@ -508,7 +524,7 @@ class NeRF(nn.Module):
             index_pred = self.index_mlp(k1.unsqueeze(1), part_fea[None, ::].expand(k1.shape[0], -1, -1)).squeeze(1)
         return index_pred, k1
 
-    def render_train(self, dens, fea, rays_o, rays_d, viewdirs, part_shape_fea, part_text_fea, **render_kwargs):
+    def render_train(self, dens, fea, rays_o, rays_d, viewdirs, idx, pf, **render_kwargs):
         assert len(rays_o.shape) == 2 and rays_o.shape[-1] == 3, 'Only suuport point queries in [N, 3] format'
         # for fie in field:
         ret_dict = {}
@@ -562,10 +578,14 @@ class NeRF(nn.Module):
 
         # query for color
         batch = ray_pts.shape[0]
+        # part_code = self.part_att(self.part_code.weight)
+        part_fea = pf
 
         k0 = self.forward_grid(fea, ray_pts)
-        index_pred, _ = self.get_part_index(dens.unsqueeze(0), fea, ray_pts, part_shape_fea)
-        # fea_ind = self.index_conv(torch.cat([dens.unsqueeze(0), fea], dim=0), part_shape_fea)
+        index_pred, k1 =self.get_part_index(dens.unsqueeze(0), fea, ray_pts, part_fea)
+        # fea_ind = self.index_conv(torch.cat([dens.unsqueeze(0), fea], dim=0), part_fea)
+        # fea_ind = self.index_conv2(fea_ind)
+
         # k1 = self.forward_grid(fea_ind, ray_pts)
         # time2 = time.time()
         # print(time2 - time1)
@@ -574,10 +594,11 @@ class NeRF(nn.Module):
         # xyz_emb = torch.cat([rays_xyz, xyz_emb.sin(), xyz_emb.cos()], -1)
 
         # part_fea = self.part_mlp(self.part_embeddings.weight)
-        # index_pred = self.index_mlp(xyz_emb.unsqueeze(1), part_fea[None, ::].repeat(batch, 1, 1)).squeeze(1)
         # index_pred = [self.index_mlp(in1, in2) for in1, in2 in zip(k1.unsqueeze(1).split(8192, 0), \
-        #                                                part_shape_fea[None, ::].expand(batch, -1, -1).split(8192, 0)
-        #                                             )]
+        #                                                            part_fea[None, ::].expand(batch, -1, -1).split(
+        #                                                                8192, 0)
+        #                                                            )]
+        # index_pred = [self.index_mlp(in1) for in1 in k1.unsqueeze(1).split(8192, 0)]
         # index_pred = torch.cat(index_pred, dim=0).squeeze(1) # B, num_parts+1
         # time0 = time.time()
         part_marched = segment_coo(
@@ -600,15 +621,19 @@ class NeRF(nn.Module):
                 viewdirs_emb = (viewdirs.unsqueeze(-1) * self.viewfreq).flatten(-2)
                 viewdirs_emb = torch.cat([viewdirs, viewdirs_emb.sin(), viewdirs_emb.cos()], -1)
                 viewdirs_emb = viewdirs_emb.flatten(0, -2)[ray_id]
-                k0_view = torch.cat([k0_view, viewdirs_emb], -1)
+                # k0_view = torch.cat([k0_view, viewdirs_emb], -1)
+                k0_view = torch.cat([k0, viewdirs_emb], -1)
+                texture_code = self.texture_embs.weight[idx]
+                texture_code = self.texture_dec(texture_code)
                 rgb_feat = [self.feat_mlp(in1, in2) for in1, in2 in zip(k0_view.unsqueeze(1).split(8192, 0), \
-                                                           part_text_fea[None, ::].expand(batch, -1, -1).split(8192, 0)
+                                                           texture_code[None, ::].expand(batch, -1, -1).split(8192, 0)
                                                         )]
                 rgb_feat = torch.cat(rgb_feat, dim=0).squeeze(1)
                 # rgb_feat = torch.cat([rgb_feat, point_fea], dim=-1)
                 # rgb_logit = torch.zeros(rgb_feat.shape[0], 3, device=rgb_feat.device) - 100
 
                 rgb_logit = self.rgbnet(rgb_feat)
+                # rgb_logit = self.rgbnet(k0_view)
                 # time2 = time.time()
                 # print(time2 - time1)
                 if self.cfg.dvgo.rgbnet_direct:
@@ -829,24 +854,37 @@ class IndexConvMSWA(nn.Module):
         self.mlp = Mlp(in_features=hidden_dim, hidden_features=hidden_dim * 2, drop=0.)
         self.win_size = win_size
 
-    def forward(self, x, part_f):
+    def forward(self, x, part_f=None):
         # x: C, X, Y, Z;  part_f: num_parts, C
         shortcut = self.in_layer(x.unsqueeze(0)) # 1, C, X, Y, Z
         B, C, X, Y, Z = shortcut.shape
-        num_parts = part_f.shape[0]
         q_s = self.avgpool_q(shortcut)
         qg = self.avgpool_q(shortcut).permute(0, 2, 3, 4, 1).contiguous()
         qg = qg + self.pos_enc(qg)
         qg = qg.view(1, -1, C)
 
-        part_f = self.in_layer_part(part_f)
-        num_window_q = qg.shape[1]
-        qg = self.q_lin(qg).reshape(1, num_window_q, self.heads, C // self.heads).permute(0, 2, 1,
-                                                                                          3).contiguous()
-        kg = self.k_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
-                                                                                           3).contiguous()
-        vg = self.v_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
-                                                                                          3).contiguous()
+        if part_f is not None:
+            num_parts = part_f.shape[0]
+            part_f = self.in_layer_part(part_f)
+            num_window_q = qg.shape[1]
+            qg = self.q_lin(qg).reshape(1, num_window_q, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                              3).contiguous()
+            kg = self.k_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                               3).contiguous()
+            vg = self.v_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                               3).contiguous()
+        else:
+            part_f = self.avgpool_q(shortcut).permute(0, 2, 3, 4, 1).contiguous()
+            part_f = part_f.view(1, -1, C)
+            num_window_q = qg.shape[1]
+            num_parts = part_f.shape[1]
+            qg = self.q_lin(qg).reshape(1, num_window_q, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                              3).contiguous()
+            kg = self.k_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                               3).contiguous()
+            vg = self.v_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                               3).contiguous()
+
         attn = (qg @ kg.transpose(-2, -1))
         attn = self.softmax(attn)
         qg = (attn @ vg).transpose(1, 2).reshape(1, num_window_q, C)
@@ -856,6 +894,132 @@ class IndexConvMSWA(nn.Module):
         q_s = F.interpolate(q_s, size=(X, Y, Z), mode='trilinear', align_corners=True)
         out = shortcut + self.out_layer(q_s)
         return out[0] # C, X, Y, Z
+
+class IndexConvMSWA2(nn.Module):
+    def __init__(self, in_dim, hidden_dim=128, part_dim=128, heads=4, win_size=[8, 8, 8]):
+        super(IndexConvMSWA2, self).__init__()
+        # self.in_layer = nn.Sequential(
+        #     nn.Conv3d(in_dim, hidden_dim, 1),
+        #     nn.GroupNorm(8, hidden_dim)
+        # )
+        self.in_layer_part = nn.Linear(part_dim, hidden_dim)
+        self.heads = heads
+        self.q_lin = nn.Linear(hidden_dim, hidden_dim, 1)
+        self.k_lin = nn.Linear(hidden_dim, hidden_dim, 1)
+        self.v_lin = nn.Linear(hidden_dim, hidden_dim, 1)
+        self.act = nn.ReLU()
+        self.out_layer = nn.Sequential(
+            nn.Conv3d(hidden_dim, hidden_dim, 1),
+            nn.GroupNorm(8, hidden_dim)
+        )
+        self.pos_enc = PositionEmbeddingSine3D(hidden_dim)
+        self.avgpool_q = nn.AdaptiveAvgPool3d(output_size=win_size)
+        self.softmax = nn.Softmax(dim=-1)
+        self.mlp = Mlp(in_features=hidden_dim, hidden_features=hidden_dim * 2, drop=0.)
+        self.win_size = win_size
+
+    def forward(self, x, part_f=None):
+        # x: C, X, Y, Z;  part_f: num_parts, C
+        # shortcut = self.in_layer(x.unsqueeze(0)) # 1, C, X, Y, Z
+        shortcut = x.unsqueeze(0)
+        B, C, X, Y, Z = shortcut.shape
+        q_s = self.avgpool_q(shortcut)
+        qg = self.avgpool_q(shortcut).permute(0, 2, 3, 4, 1).contiguous()
+        qg = qg + self.pos_enc(qg)
+        qg = qg.view(1, -1, C)
+
+        if part_f is not None:
+            num_parts = part_f.shape[1]
+            part_f = self.in_layer_part(part_f)
+            num_window_q = qg.shape[1]
+            qg = self.q_lin(qg).reshape(1, num_window_q, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                              3).contiguous()
+            kg = self.k_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                               3).contiguous()
+            vg = self.v_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                               3).contiguous()
+        else:
+            part_f = self.avgpool_q(shortcut).permute(0, 2, 3, 4, 1).contiguous()
+            part_f = part_f.view(1, -1, C)
+            num_window_q = qg.shape[1]
+            num_parts = part_f.shape[1]
+            qg = self.q_lin(qg).reshape(1, num_window_q, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                              3).contiguous()
+            kg = self.k_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                               3).contiguous()
+            vg = self.v_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                               3).contiguous()
+
+        attn = (qg @ kg.transpose(-2, -1))
+        attn = self.softmax(attn)
+        qg = (attn @ vg).transpose(1, 2).reshape(1, num_window_q, C)
+        qg = qg.transpose(1, 2).reshape(1, C, self.win_size[0], self.win_size[1], self.win_size[2])
+        q_s = q_s + qg
+        q_s = q_s + self.mlp(q_s)
+        q_s = F.interpolate(q_s, size=(X, Y, Z), mode='trilinear', align_corners=True)
+        out = shortcut + self.out_layer(q_s)
+        return out[0] # C, X, Y, Z
+
+class MSWA_3D(nn.Module): # Multi-Scale Window-Attention
+    def __init__(self, dim, heads=4, window_size_q=[4, 4, 4],
+                 window_size_k=[[4, 4, 4], [2, 2, 2], [1, 1, 1]], drop=0.1):
+        super(MSWA_3D, self).__init__()
+        # assert  dim == heads * dim_head
+        dim_head = dim // heads
+        self.scale = dim_head ** -0.5
+        self.heads = heads
+        hidden_dim = dim_head * heads
+        # self.qkv = nn.Conv3d(dim, hidden_dim*3, 1)
+        self.q_lin = nn.Linear(dim, hidden_dim, 1)
+        self.k_lin = nn.Linear(dim, hidden_dim, 1)
+        self.v_lin = nn.Linear(dim, hidden_dim, 1)
+        self.pos_enc = PositionEmbeddingSine3D(hidden_dim)
+        self.window_size_q = window_size_q
+        self.avgpool_q = nn.AdaptiveAvgPool3d(output_size=window_size_q)
+        self.avgpool_ks = nn.ModuleList()
+        for i in range(len(window_size_k)):
+            self.avgpool_ks.append(nn.AdaptiveAvgPool3d(output_size=window_size_k[i]))
+        self.softmax = nn.Softmax(dim=-1)
+        self.mlp = Mlp(in_features=hidden_dim, hidden_features=hidden_dim*2, drop=drop)
+        self.out_conv = nn.Sequential(
+            nn.Conv3d(hidden_dim, hidden_dim, 1),
+            nn.GroupNorm(8, hidden_dim)
+        )
+
+    def forward(self, x):
+        B, C, X, Y, Z = x.shape
+        shortcut = x
+        q_s = self.avgpool_q(x)
+        qg = self.avgpool_q(x).permute(0, 2, 3, 4, 1).contiguous()
+        qg = qg + self.pos_enc(qg)
+        qg = qg.view(B, -1, C)
+        kgs = []
+        for avgpool in self.avgpool_ks:
+            kg_tmp = avgpool(x).permute(0, 2, 3, 4, 1).contiguous()
+            kg_tmp = kg_tmp + self.pos_enc(kg_tmp)
+            kg_tmp = kg_tmp.view(B, -1, C)
+            kgs.append(kg_tmp)
+        kg = torch.cat(kgs, dim=1)
+
+        num_window_q = qg.shape[1]
+        num_window_k = kg.shape[1]
+        qg = self.q_lin(qg).reshape(B, num_window_q, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                           3).contiguous()
+        kg2 = self.k_lin(kg).reshape(B, num_window_k, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                            3).contiguous()
+        vg = self.v_lin(kg).reshape(B, num_window_k, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                           3).contiguous()
+        kg = kg2
+        attn = (qg @ kg.transpose(-2, -1))
+        attn = self.softmax(attn)
+        qg = (attn @ vg).transpose(1, 2).reshape(B, num_window_q, C)
+        qg = qg.transpose(1, 2).reshape(B, C, self.window_size_q[0], self.window_size_q[1], self.window_size_q[2])
+        # qg = F.interpolate(qg, size=(H1p, W1p), mode='bilinear', align_corners=False)
+        q_s = q_s + qg
+        q_s = q_s + self.mlp(q_s)
+        q_s = F.interpolate(q_s, size=(X, Y, Z), mode='trilinear', align_corners=True)
+        out = shortcut + self.out_conv(q_s)
+        return out
 
 class IndexMLP(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_dim=128, part_dim=128, n_layers=3):
@@ -912,3 +1076,17 @@ class PartAtt(nn.Module):
             x = hidden_layer(x)
         return x[0]
 
+class DecNet(nn.Module):
+    def __init__(self, num_parts, part_fea_dim, n_layers=4):
+        super(DecNet, self).__init__()
+        self.num_parts = num_parts
+        self.part_fea_dim = part_fea_dim
+        self.mlp = nn.Linear(part_fea_dim, num_parts * part_fea_dim)
+        self.att = PartAtt(self.part_fea_dim, self.part_fea_dim, n_layers=n_layers)
+
+    def forward(self, x):
+        if x.dim() == 1:
+            x = x.reshape(1, -1)
+        x = self.mlp(x).reshape(self.num_parts, self.part_fea_dim)
+        x = self.att(x)
+        return x

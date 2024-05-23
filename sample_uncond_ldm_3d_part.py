@@ -143,9 +143,12 @@ def main(args):
         amp=train_cfg['amp'], fp16=train_cfg.fp16, log_freq=train_cfg.log_freq, cfg=cfg,
         resume_milestone=train_cfg.get('resume_milestone', 0),
     )
-    idx = range(200, 400)
-    save_folder = Path('/media/huang/T7/data/diff_nerf/sample_chair_dpm')
+    sample_cfg = cfg.sampler
+    # idx = range(200, 400)
+    idx = range(0, 101)
+    save_folder = Path(sample_cfg.save_folder)
     save_folder.mkdir(exist_ok=True)
+    (save_folder / 'mesh').mkdir(exist_ok=True)
     (save_folder/'img').mkdir(exist_ok=True)
     (save_folder / 'part').mkdir(exist_ok=True)
     if trainer.accelerator.is_main_process:
@@ -157,13 +160,15 @@ def main(args):
                     datatmp[key] = datatmp[key].to(trainer.accelerator.device)
             if isinstance(trainer.model, nn.parallel.DistributedDataParallel):
                 trainer.model.module.render_img_sample_lopp(
-                    idx, nerf_cfg, save_folder, export_mesh=False,
+                    idx, nerf_cfg, save_folder, export_mesh=sample_cfg.export_mesh,
+                    export_img=sample_cfg.export_img,
                     input=datatmp)
             elif isinstance(trainer.model, nn.Module):
                 trainer.model.render_img_sample_lopp(idx,
                                                    nerf_cfg,
                                                    save_folder,
-                                                   export_mesh=False,
+                                                   export_mesh=sample_cfg.export_mesh,
+                                                   export_img=sample_cfg.export_img,
                                                    input=datatmp,
                                                    )
     '''

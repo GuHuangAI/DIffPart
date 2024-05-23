@@ -168,6 +168,7 @@ data:
   sample_num: 5
   normalize: False
   num_objects: 200
+  cls_names: ['04379243']
 #  img_size: [64, 64, 64]
 
 trainer:
@@ -178,11 +179,16 @@ trainer:
   save_and_sample_every: 10000
   log_freq: 500
 #  results_folder: '/media/huang/T7/data/diff_nerf/result_ae_kl_64x64x64_d4_mlp3_non_normalize_non_cls'
-  results_folder: '/media/huang/T7/data/diff_nerf/result_uncond_ddm_ldm_part_nerf7'
-  test_folder: '/media/huang/T7/data/diff_nerf/result_uncond_ddm_ldm_part_nerf7_test7'
+  results_folder: '/media/huang/T7/data/diff_nerf/table_uncond_ddm_ldm_part_nerf7'
+  test_folder: '/media/huang/T7/data/diff_nerf/table_uncond_ddm_ldm_part_nerf7_test7'
   amp: False
   fp16: False
   test_before: True
   resume_milestone: current
   ema_update_after_step: 10000
   ema_update_every: 8
+
+sampler:
+  save_folder: '/media/huang/T7/data/diff_nerf/sample_table'
+  export_mesh: True
+  export_img: False

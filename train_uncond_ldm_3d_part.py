@@ -10,7 +10,7 @@ from diff_nerf.utils import *
 import torchvision as tv
 from diff_nerf.encoder_decoder3d import AutoencoderKL
 # from denoising_diffusion_pytorch.data import ImageDataset, CIFAR10
-# from diff_nerf.mesh_utils import export_meshes_to_path
+from diff_nerf.mesh_utils import export_meshes_to_path
 from diff_nerf.data import VolumeDataset, default_collate
 from torch.utils.data import DataLoader
 from multiprocessing import cpu_count
@@ -154,15 +154,15 @@ def main(args):
                         batch_size = datatmp[key].shape[0]
                         # print(trainer.accelerator.device)
                 if isinstance(trainer.model, nn.parallel.DistributedDataParallel):
-                    rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = trainer.model.module.render_img_sample(batch_size, nerf_cfg, export_mesh=False,
+                    rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = trainer.model.module.render_img_sample(batch_size, nerf_cfg, export_mesh=True,
                                                                                      input=datatmp)
                 elif isinstance(trainer.model, nn.Module):
-                    rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = trainer.model.render_img_sample(batch_size, nerf_cfg, export_mesh=False,
+                    rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = trainer.model.render_img_sample(batch_size, nerf_cfg, export_mesh=True,
                                                                               input=datatmp,
                                                                                 )
                 # all_images = torch.clamp((all_images + 1.0) / 2.0, min=0.0, max=1.0)
-            # for i, (mesh, part_mesh_list) in enumerate(zip(meshes, part_mesh_lists)):
-            #     export_meshes_to_path(trainer.results_folder / 'mesh' / f'{i}', mesh, part_mesh_list)
+            for i, (mesh, part_mesh_list) in enumerate(zip(meshes, part_mesh_lists)):
+                export_meshes_to_path(trainer.results_folder / 'mesh' / f'{i}', mesh, part_mesh_list)
             # all_images = torch.cat(all_images_list, dim = 0)
             for j in range(len(rgbss)):
                 rgbs = rgbss[j]

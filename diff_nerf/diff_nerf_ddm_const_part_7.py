@@ -1,11 +1,13 @@
 '''
 compared to original diff_nerf_ddm_const_part.py
-1. add the part embedding as condition
-2. add the shape and texture embedding
+1. remove the part embedding as condition
+2. remove the shape and texture embedding
+3. add image as condition
+4. fix testing bug
+5. part code as condition is in nerf
 '''
 import torch
 import torch.nn as nn
-import torchvision as tv
 import math
 import torch.nn.functional as F
 import os
@@ -13,7 +15,7 @@ from diff_nerf.utils import default, identity, normalize_to_neg_one_to_one, unno
 import random
 from einops import rearrange, reduce
 from functools import partial
-from diff_nerf.mesh_utils import export_meshes_to_path
+#from diff_nerf.mesh_utils import export_meshes_to_path
 #from random import random, randint, sample, choice
 from torch.cuda.amp import custom_bwd, custom_fwd
 import numpy as np
@@ -108,15 +110,19 @@ class DDPM(nn.Module):
         ### define part ###
         self.num_parts = cfg.get("num_parts", 5)
         self.part_fea_dim = cfg.get("part_fea_dim", 64)
-        self.shape_embs = nn.Embedding(cfg.get("num_shape", 500), self.part_fea_dim)
-        self.texture_embs = nn.Embedding(cfg.get("num_shape", 500), self.part_fea_dim)
+        # self.part_code = nn.Embedding(self.num_parts, self.part_fea_dim)
+        # self.texture_code = nn.Embedding(self.num_parts, self.part_fea_dim)
+        # self.shape_embs = nn.Embedding(cfg.get("num_shape", 500), self.part_fea_dim)
+        # self.texture_embs = nn.Embedding(cfg.get("num_shape", 500), self.part_fea_dim)
         # self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
         # nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
-        nn.init.normal_(self.shape_embs.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
-        nn.init.normal_(self.texture_embs.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        # nn.init.normal_(self.shape_embs.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        # nn.init.normal_(self.texture_embs.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        # nn.init.normal_(self.part_code.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
         # self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
-        self.part_shape_mlp = DecNet(self.num_parts, self.part_fea_dim, n_layers=3)
-        self.part_texture_mlp = DecNet(self.num_parts, self.part_fea_dim, n_layers=3)
+        # self.part_shape_mlp = DecNet(self.num_parts, self.part_fea_dim, n_layers=3)
+        # self.part_texture_mlp = DecNet(self.num_parts, self.part_fea_dim, n_layers=3)
+        # self.part_att = PartAtt(in_dim=self.part_fea_dim)
 
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys, only_model)
@@ -364,7 +370,7 @@ class DDPM(nn.Module):
         try:
             render_poses = inputs['render_kwargs']['poses']
         except:
-            render_pose = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180, 180, 5)[:-1]],
+            render_pose = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180, 180, 10)[:-1]],
                                       0)
             render_poses = [render_pose for _ in range(input.shape[0])]
         # Ks = render_kwargs['Ks']
@@ -661,6 +667,7 @@ class LatentDiffusion(DDPM):
     def p_losses(self, batch, t, noise=None, global_step=1e9, **kwargs):
         x_start = batch['input']
         idx = batch['obj_idx']
+        # img_cond = batch['ref_img']
         if self.start_dist == 'normal':
             noise = torch.randn_like(x_start)
         elif self.start_dist == 'uniform':
@@ -669,11 +676,13 @@ class LatentDiffusion(DDPM):
             raise NotImplementedError(f'{self.start_dist} is not supported !')
         # K = -1. * torch.ones_like(x_start)
         # C = noise - x_start  # t = 1000 / 1000
-        part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx]) # B, num_parts, part_fea_dim
-        part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx]) # B, num_parts, part_fea_dim
+        # part_fea = self.part_att(self.part_code.weight)
+        # part_texture_fea = self.texture_embs.weight[idx]
+        # part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx]) # B, num_parts, part_fea_dim
+        # part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx]) # B, num_parts, part_fea_dim
         C = -1 * x_start  # U(t) = Ct, U(1) = - x0
         x_noisy = self.q_sample(x_start=x_start, noise=noise, t=t, C=C)  # (b, 2, c, h, w)
-        pred = self.model(x_noisy, t, cond1=part_shape_fea, cond2=part_texture_fea, **kwargs)
+        pred = self.model(x_noisy, t, cond1=None, cond2=None, **kwargs)
         C_pred, noise_pred = pred
         # C_pred = C_pred / torch.sqrt(t)
         # noise_pred = noise_pred / torch.sqrt(1 - t)
@@ -703,7 +712,7 @@ class LatentDiffusion(DDPM):
         if self.weighting_loss:
             # simple_weight1 = torch.exp(t)
             # simple_weight2 = torch.exp(torch.sqrt(1 - t))
-            simple_weight1 = 1 / t#.sqrt()
+            simple_weight1 = 1 / t #.sqrt()
             simple_weight2 = 1 / (1 - t + self.eps)#.sqrt()
         else:
             simple_weight1 = 1
@@ -725,13 +734,11 @@ class LatentDiffusion(DDPM):
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
         loss = loss_simple + loss_vlb
 
-        loss += 0.0001 * torch.norm(self.shape_embs.weight, dim=-1).mean()
-        loss += 0.0001 * torch.norm(self.texture_embs.weight, dim=-1).mean()
 
         with torch.no_grad():
             x_rec_dec = self.first_stage_model.decode(x_rec / self.scale_factor)
         # class_id = batch["class_id"]
-        SpecifyGradient2.apply(x_rec, x_rec_dec)
+        x_rec_dec = SpecifyGradient2.apply(x_rec, x_rec_dec)
         if self.cfg.nerf.weight_tv > 0:
             grid = x_rec_dec * self.std_scale
             loss_tv = self.total_variation(grid) * self.cfg.nerf.weight_tv
@@ -745,20 +752,23 @@ class LatentDiffusion(DDPM):
         if self.use_render_loss and global_step >= self.cfg.get('render_start', 0):
             if global_step >= self.cfg.get("joint_step", 0): # joint optimizing
                 render_kwargs = batch["render_kwargs"]
-                kwargs['part_shape_fea'] = part_shape_fea  # B, num_parts, part_fea_dim
-                kwargs['part_texture_fea'] = part_texture_fea  # B, num_parts, part_fea_dim
+                kwargs['idx'] = idx
+                # kwargs['part_shape_fea'] = part_shape_fea  # B, num_parts, part_fea_dim
+                # kwargs['part_texture_fea'] = part_texture_fea  # B, num_parts, part_fea_dim
                 loss_render, loss_render_dict = self.nerf(x_rec_dec * self.std_scale, render_kwargs, loss_weight=render_weight,
                                                           global_step=global_step, joint_learn=True, **kwargs)
                 loss_dict.update(loss_render_dict)
                 loss += loss_render
             else: # independent optimizing
                 render_kwargs = batch["render_kwargs"]
-                kwargs['part_shape_fea'] = part_shape_fea.detach()  # B, num_parts, part_fea_dim
-                kwargs['part_texture_fea'] = part_texture_fea.detach()  # B, num_parts, part_fea_dim
+                kwargs['idx'] = idx
+                # kwargs['part_shape_fea'] = part_shape_fea.detach()  # B, num_parts, part_fea_dim
+                # kwargs['part_texture_fea'] = part_texture_fea.detach()  # B, num_parts, part_fea_dim
                 loss_render, loss_render_dict = self.nerf(x_rec_dec.detach() * self.std_scale, render_kwargs, loss_weight=render_weight,
                                                           global_step=global_step, **kwargs)
                 loss_dict.update(loss_render_dict)
-
+            loss += 0.0001 * torch.norm(self.nerf.part_code.weight, dim=-1).mean()
+            loss += 0.0001 * torch.norm(self.nerf.texture_embs.weight, dim=-1).mean()
         return loss, loss_dict
 
     def render_loss(self, field, render_kwargs, **kwargs):
@@ -869,13 +879,16 @@ class LatentDiffusion(DDPM):
 
 
     @torch.no_grad()
-    def sample(self, batch_size=16, up_scale=1, cond=None, mask=None, denoise=True, device=None, part_shape_fea=None, part_texture_fea=None):
+    def sample(self, batch_size=16, up_scale=1, cond=None, mask=None, denoise=True, device=None,
+               part_shape_fea=None, part_texture_fea=None, image=None):
         image_size, channels = self.image_size, self.channels
         if cond is not None:
             batch_size = cond.shape[0]
         down_ratio = self.first_stage_model.down_ratio
         z = self.sample_fn((batch_size, channels, image_size[0] // down_ratio, image_size[1] // down_ratio, image_size[2] // down_ratio),
-                           up_scale=up_scale, unnormalize=False, cond=cond, denoise=denoise, device=device, part_shape_fea=part_shape_fea, part_texture_fea=part_texture_fea)
+                           up_scale=up_scale, unnormalize=False, cond=cond, denoise=denoise, device=device,
+                           part_shape_fea=part_shape_fea, part_texture_fea=part_texture_fea, image=image,
+                           )
 
         if self.scale_by_std:
             z = 1. / self.scale_factor * z.detach()
@@ -891,7 +904,8 @@ class LatentDiffusion(DDPM):
         return x_rec
 
     @torch.no_grad()
-    def sample_fn(self, shape, up_scale=1, unnormalize=True, cond=None, denoise=False, device=None, part_shape_fea=None, part_texture_fea=None):
+    def sample_fn(self, shape, up_scale=1, unnormalize=True, cond=None, denoise=False,
+                  device=None, part_shape_fea=None, part_texture_fea=None, image=None):
         batch, device, total_timesteps, sampling_timesteps, objective = shape[0], \
             device, self.num_timesteps, self.sampling_timesteps, self.objective
 
@@ -922,7 +936,7 @@ class LatentDiffusion(DDPM):
             if cond is not None:
                 pred = self.model(img, cur_time, cond)
             else:
-                pred = self.model(img, cur_time, cond1=part_shape_fea, cond2=part_texture_fea)
+                pred = self.model(img, cur_time, cond1=part_shape_fea, cond2=part_texture_fea, image=image)
             # C, noise = pred.chunk(2, dim=1)
             C, noise = pred[:2]
             if self.scale_by_softsign:
@@ -946,14 +960,17 @@ class LatentDiffusion(DDPM):
     def render_img_sample(self, batch_size, render_kwargs, export_mesh=False, **kwargs):
         device = self.device_buffer.device
         input = kwargs['input']
+        # ref_img = input['ref_img']
         H, W, focal = render_kwargs.hwf
         K = np.array([
             [focal, 0, 0.5 * W],
             [0, focal, 0.5 * H],
             [0, 0, 1]
         ])
-        # batch_size = 5
 
+        render_pose = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180, 180, 10)[:-1]],
+                                  0)
+        render_poses = [render_pose for _ in range(batch_size)]
         # Ks = render_kwargs['Ks']
         ndc = render_kwargs.ndc
         render_factor = render_kwargs.render_factor
@@ -965,25 +982,12 @@ class LatentDiffusion(DDPM):
             K[:2, :3] /= render_factor
 
         #### model ####
-        idx = input['obj_idx']
-        # idx = list(range(40, 46))# [5, 6, 7, 8, 9]  # 2, 3 ,4,5,6,7,8,9]
-        part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx])  # B, num_parts, part_fea_dim
-        part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx])  # B, num_parts, part_fea_dim
-
-
-
-        # part_shape_code = 1 * self.shape_embs.weight[[1, 1, 1, 1, 1]] #+ 0.5 * self.shape_embs.weight[[1, 2, 3, 4, 0]]  # B, part_fea_dim
-        # part_texture_code = 1 * self.texture_embs.weight[[0,1,2,3,4]] #+ 0.5 * self.texture_embs.weight[[1, 2, 3, 4, 0]]  # B, part_fea_dim
-        # part_texture_code = 1 * self.texture_embs.weight[[2, 3, 6, 7, 8]]
-        # part_shape_fea = self.part_shape_mlp(part_shape_code)  # B, num_parts, part_fea_dim
-        # part_texture_fea = self.part_texture_mlp(part_texture_code)  # B, num_parts, part_fea_dim
+        # idx = random.sample(list(range(200)), batch_size)
+        idxs = input['obj_idx']
         # part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx])  # B, num_parts, part_fea_dim
         # part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx])  # B, num_parts, part_fea_dim
-        batch_size = len(idx)
-        render_pose = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180, 180, 10)[:-1]],
-                                  0)
-        render_poses = [render_pose for _ in range(batch_size)]
-        reconstructions = self.sample(batch_size=batch_size, up_scale=1, cond=None, mask=None, device=device, part_shape_fea=part_shape_fea, part_texture_fea=part_texture_fea)
+        reconstructions = self.sample(batch_size=batch_size, up_scale=1, cond=None, mask=None, device=device,
+                                      part_shape_fea=None, part_texture_fea=None)
         # try:
         #     cls_logits = self.first_stage_model.classifier(reconstructions)
         #     cls_ids = torch.max(cls_logits, 1)[1]
@@ -1006,6 +1010,7 @@ class LatentDiffusion(DDPM):
             parts = []
             depths = []
             bgmaps = []
+            idx = idxs[idx_obj]
             dens = reconstructions[idx_obj][0]
             fea = reconstructions[idx_obj][1:]
             # fea = fea + self.first_stage_model.residual(fea.unsqueeze(0))[0]
@@ -1027,7 +1032,7 @@ class LatentDiffusion(DDPM):
                 viewdirs = viewdirs.flatten(0, -2).to(device)
                 render_result_chunks = [
                     {k: v for k, v in
-                     self.nerf.render_train(dens, fea, ro, rd, vd, part_shape_fea[idx_obj], part_texture_fea[idx_obj], **render_kwargs).items() if k in keys}
+                     self.nerf.render_train(dens, fea, ro, rd, vd, idx, **render_kwargs).items() if k in keys}
                     for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
                 ]
                 render_result = {
@@ -1042,11 +1047,6 @@ class LatentDiffusion(DDPM):
                 bgmap = render_result['alphainv_last'].permute(2, 0, 1)
                 part = render_result['part_marched'].permute(2, 0, 1)
                 part = torch.argmax(part, dim=0, keepdim=True).to(torch.float)
-                # part[part == 4] = 0.
-                # part[part == 3] = 0.25
-                # part[part == 2] = 0.5
-                # part[part == 1] = 0.75
-                # part[part == 0] = 1.
                 colors = torch.Tensor([
                     [1, 1, 1],  #
                     [0, 0, 1],  #
@@ -1077,154 +1077,6 @@ class LatentDiffusion(DDPM):
             return rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists
         return rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists
 
-    @torch.no_grad()
-    def render_img_sample_lopp(self, idx, render_kwargs, save_folder, export_img=True, export_mesh=False, **kwargs):
-        device = self.device_buffer.device
-        input = kwargs['input']
-        H, W, focal = render_kwargs.hwf
-        K = np.array([
-            [focal, 0, 0.5 * W],
-            [0, focal, 0.5 * H],
-            [0, 0, 1]
-        ])
-        batch_size = 5
-
-        # Ks = render_kwargs['Ks']
-        ndc = render_kwargs.ndc
-        render_factor = render_kwargs.render_factor
-        if render_factor != 0:
-            # HW = np.copy(HW)
-            # Ks = np.copy(Ks)
-            H = (H / render_factor).astype(int)
-            W = (W / render_factor).astype(int)
-            K[:2, :3] /= render_factor
-
-        #### model ####
-        # idx = input['obj_idx']
-        # idx = list(range(40, 46))  # [5, 6, 7, 8, 9]  # 2, 3 ,4,5,6,7,8,9
-        total_batch = math.ceil(len(idx) / batch_size)
-        n = 0
-        for batch_id in range(total_batch):
-            batch_idx = idx[batch_id * batch_size: (batch_id + 1) * batch_size]
-            cur_batch_size = len(batch_idx)
-            part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[batch_idx])  # B, num_parts, part_fea_dim
-            part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[batch_idx])  # B, num_parts, part_fea_dim
-
-        # part_shape_code = 1 * self.shape_embs.weight[[1, 1, 1, 1, 1]] #+ 0.5 * self.shape_embs.weight[[1, 2, 3, 4, 0]]  # B, part_fea_dim
-        # part_texture_code = 1 * self.texture_embs.weight[[0,1,2,3,4]] #+ 0.5 * self.texture_embs.weight[[1, 2, 3, 4, 0]]  # B, part_fea_dim
-        # part_texture_code = 1 * self.texture_embs.weight[[2, 3, 6, 7, 8]]
-        # part_shape_fea = self.part_shape_mlp(part_shape_code)  # B, num_parts, part_fea_dim
-        # part_texture_fea = self.part_texture_mlp(part_texture_code)  # B, num_parts, part_fea_dim
-        # part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx])  # B, num_parts, part_fea_dim
-        # part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx])  # B, num_parts, part_fea_dim
-        # batch_size = len(idx)
-            render_pose = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180, 180, 11)[:-1]],
-                                      0)
-            render_poses = [render_pose for _ in range(cur_batch_size)]
-            reconstructions = self.sample(batch_size=cur_batch_size, up_scale=1, cond=None, mask=None, device=device,
-                                          part_shape_fea=part_shape_fea, part_texture_fea=part_texture_fea)
-        # try:
-        #     cls_logits = self.first_stage_model.classifier(reconstructions)
-        #     cls_ids = torch.max(cls_logits, 1)[1]
-        # except:
-        #     cls_ids = None
-            reconstructions = reconstructions * self.std_scale
-            # reconstructions = input
-            rgbss = []
-            partss = []
-            depthss = []
-            bgmapss = []
-            meshes = []
-            part_mesh_lists = []
-            for idx_obj in range(reconstructions.shape[0]):
-                if export_mesh:
-                    mesh, part_mesh_list = self.nerf.export_mesh(reconstructions[idx_obj], part_shape_fea[idx_obj])
-                    export_meshes_to_path(save_folder / 'mesh' / f'{n+idx_obj}', mesh, part_mesh_list)
-                    # meshes.append(mesh)
-                    # part_mesh_lists.append(part_mesh_list)
-                if export_img:
-                    rgbs = []
-                    parts = []
-                    depths = []
-                    bgmaps = []
-                    dens = reconstructions[idx_obj][0]
-                    fea = reconstructions[idx_obj][1:]
-                    # fea = fea + self.first_stage_model.residual(fea.unsqueeze(0))[0]
-                    render_pose = render_poses[idx_obj]
-                    # if cls_ids is not None:
-                    #     render_kwargs['class_id'] = cls_ids[idx_obj].item()
-                    for i, c2w in enumerate(render_pose):
-                        # H, W = HW[i]
-                        # K = Ks[i]
-                        # H, W = HW
-                        # K = Ks
-                        c2w = torch.Tensor(c2w)
-                        rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
-                            H, W, K, c2w, ndc, inverse_y=render_kwargs.inverse_y,
-                            flip_x=render_kwargs.flip_x, flip_y=render_kwargs.flip_y)
-                        keys = ['rgb_marched', 'depth', 'alphainv_last', 'part_marched']
-                        rays_o = rays_o.flatten(0, -2).to(device)
-                        rays_d = rays_d.flatten(0, -2).to(device)
-                        viewdirs = viewdirs.flatten(0, -2).to(device)
-                        render_result_chunks = [
-                            {k: v for k, v in
-                             self.nerf.render_train(dens, fea, ro, rd, vd, part_shape_fea[idx_obj], part_texture_fea[idx_obj],
-                                                    **render_kwargs).items() if k in keys}
-                            for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
-                        ]
-                        render_result = {
-                            k: torch.cat([ret[k] for ret in render_result_chunks]).reshape(H, W, -1)
-                            for k in render_result_chunks[0].keys()
-                        }
-
-                        if render_kwargs.render_depth:
-                            depth = render_result['depth'].permute(2, 0, 1)
-                            depths.append(depth)
-                        rgb = render_result['rgb_marched'].permute(2, 0, 1)
-                        bgmap = render_result['alphainv_last'].permute(2, 0, 1)
-                        part = render_result['part_marched'].permute(2, 0, 1)
-                        part = torch.argmax(part, dim=0, keepdim=True).to(torch.float)
-                        # part[part == 4] = 0.
-                        # part[part == 3] = 0.25
-                        # part[part == 2] = 0.5
-                        # part[part == 1] = 0.75
-                        # part[part == 0] = 1.
-                        colors = torch.Tensor([
-                            [1, 1, 1],  #
-                            [0, 0, 1],  #
-                            [1, 0, 0],  #
-                            [0, 1, 0],  #
-                            [1, 1, 0]
-                            # Add more colors for other classes as needed
-                        ])
-                        part_rgb = torch.ones((part.shape[1], part.shape[2], 3))
-                        # part = part_rgb.expand(3, part.shape[0], part.shape[1])
-                        for ii in range(len(colors)):
-                            mask = torch.all(part == ii, dim=0)
-                            # mask = part == ii
-                            part_rgb[mask] = colors[ii]
-                        part_rgb = part_rgb.permute(2, 0, 1)
-                        # parts.append(part_rgb)
-                        # rgbs.append(rgb)
-                        # bgmaps.append(bgmap)
-                        tv.utils.save_image(rgb,
-                                            str(save_folder/ 'img' / f'obj-{n+idx_obj}-view-{i}-color.png'))
-                        tv.utils.save_image(part_rgb,
-                                            str(save_folder / 'part' / f'obj-{n+idx_obj}-view-{i}-part.png'))
-                    # rgbss.append(rgbs)
-                    # partss.append(parts)
-                    # depthss.append(depths)
-                    # bgmapss.append(bgmaps)
-            n += cur_batch_size
-        # rgbs = np.array(rgbs)
-        # depths = np.array(depths)
-        # bgmaps = np.array(bgmaps)
-        # del model
-        torch.cuda.empty_cache()
-        # if export_mesh:
-        #     return rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists
-        # return rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists
-
 class SpecifyGradient(torch.autograd.Function):
     @staticmethod
     @custom_fwd
@@ -1245,9 +1097,10 @@ class SpecifyGradient2(torch.autograd.Function):
     @staticmethod
     @custom_fwd
     def forward(ctx, input_tensor, out_tensor):
-        ctx.save_for_backward(out_tensor)
+        ctx.save_for_backward(input_tensor)
         # we return a dummy value 1, which will be scaled by amp's scaler so we get the scale in backward.
-        return torch.ones(input_tensor.shape, device=input_tensor.device, dtype=input_tensor.dtype)
+        # return torch.ones(input_tensor.shape, device=input_tensor.device, dtype=input_tensor.dtype)
+        return out_tensor
         # return out_tensor
 
     @staticmethod
@@ -1255,8 +1108,8 @@ class SpecifyGradient2(torch.autograd.Function):
     def backward(ctx, grad_scale):
         (gt_grad,) = ctx.saved_tensors
         # pdb.set_trace()
-        gt_grad = grad_scale
-        return gt_grad, None
+        grad_scale = F.interpolate(grad_scale, size=gt_grad.shape[-3:], mode="trilinear")
+        return grad_scale, None
 
 class PartAtt(nn.Module):
     def __init__(self, in_dim, out_dim=128, n_layers=3):

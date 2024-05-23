@@ -179,8 +179,9 @@ class MeshGenerator:
             # only ray_points key needed for evaluation of implicit field
             # X["ray_points"] = point_split[None, None, ...].repeat(1, 1, 1, 1).to(device)
             predictions = model(density, point_split.to(density.device))
-            xyz_emb = model(fea, point_split.to(density.device))
-            indexs = model_index(xyz_emb.unsqueeze(1), part_fea[None, ::].expand(xyz_emb.shape[0], -1, -1)).squeeze(1)
+            # xyz_emb = model(fea, point_split.to(density.device))
+            # indexs = model_index(xyz_emb.unsqueeze(1), part_fea[None, ::].expand(xyz_emb.shape[0], -1, -1)).squeeze(1)
+            indexs = model_index(density, fea, point_split.to(density.device), part_fea, chunk_size=0)[0]
             indexs = torch.max(indexs[:, -num_parts:], dim=-1)[1]
             part_ind = indexs == part_id
             predictions_tmp = torch.ones_like(predictions) * -10.
@@ -325,6 +326,12 @@ def reconstruct_meshes_from_model(
         )
         # Per primitive reconstruction
         part_colors = colormap(np.linspace(0, 1, num_parts))
+        part_colors = np.array([
+        [1, 1, 1],  #
+        [0, 0, 1],  #
+        [1, 0, 0],  #
+        [0, 1, 0],  #
+        [1, 1, 0]])
         for i in range(num_parts):
             part_mesh = mesh_generator.extract_mesh(implicit_field_parts_pred[..., i])
             part_color_uint8 = np.uint8(part_colors[i] * 255)
