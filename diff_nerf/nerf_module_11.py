@@ -95,7 +95,7 @@ class NeRF(nn.Module):
                                   part_dim=self.part_fea_dim, hidden_dim=64, n_layers=4)
 
         # dim0 += self.part_fea_dim
-        self.feat_mlp = RelateMLP(in_dim=pos_dim+64, out_dim=self.part_fea_dim,
+        self.feat_mlp = RelateMLP(in_dim=pos_dim+self.cfg.dvgo.rgbnet_dim, out_dim=self.part_fea_dim,
                                   part_dim=self.part_fea_dim, n_layers=3)
         self.rgbnet = nn.Sequential(
                 nn.Linear(self.part_fea_dim, rgbnet_width), nn.ReLU(inplace=True),
