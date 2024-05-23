@@ -168,7 +168,7 @@ data:
   sample_num: 5
   normalize: False
   num_objects: 200
-  cls_names: 04379243
+  cls_names: ['04379243']
 #  img_size: [64, 64, 64]
 
 trainer:
