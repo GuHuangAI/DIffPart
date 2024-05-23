@@ -161,7 +161,7 @@ data:
   load_rgb_net: False
   load_mask_cache: False
   use_rotate_transform: False
-  batch_size: 4
+  batch_size: 2
   white_bkgd: True
   load_render_kwargs: True
   load_mask: False
