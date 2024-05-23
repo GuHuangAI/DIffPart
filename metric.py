@@ -375,12 +375,15 @@ if __name__ == '__main__':
     # cov = COV_MMD_CD(a, b)
     # print(mmd, cov)
     import open3d as o3d
-    sample_shape_root = ''
-    ref_shape_root = ''
+
+    # sample_shape_root = '/media/huang/T9/part_nerf_results/tables/'
+    sample_shape_root = '/media/huang/T9/part_nerf_results/pistol/reconstructions_full/'
+    ref_shape_root = '/media/huang/T7/data/ShapeNetCore_v1/03948459/'
+    ref_render_root = '/media/huang/T7/data/diff_nerf/ShapeNet_v1_Part_Data/03948459/'
     sample_pcs = []
     ref_pcs = []
     sample_shape_list = os.listdir(sample_shape_root)
-    ref_shape_list = os.listdir(ref_shape_root)
+    ref_shape_list = os.listdir(ref_render_root)
     for i in range(len(sample_shape_list)):
         sample_shape_path = os.path.join(sample_shape_root, sample_shape_list[i])
         sample_mesh = o3d.io.read_triangle_mesh(sample_shape_path)
@@ -388,20 +391,31 @@ if __name__ == '__main__':
         sample_pc = sample_mesh.sample_points_uniformly(2048)
         sample_pc = np.asarray(sample_pc.points).astype(np.float32)
         sample_pcs.append(sample_pc)
-    sample_pcs = np.concatenate(sample_pcs, axis=0)
+    sample_pcs = np.stack(sample_pcs, axis=0)
     for i in range(len(ref_shape_list)):
-        ref_mesh_path = os.path.join(ref_shape_root, ref_shape_list[i], 'model.obj')
-        ref_mesh = o3d.io.read_triangle_mesh(ref_mesh_path)
-        xyz_min = ref_mesh.get_min_bound().min()
-        xyz_max = ref_mesh.get_max_bound().max()
-        bound = max(abs(xyz_max), abs(xyz_min)) + 0.05
-        scale_to_unit_sphere = 1 / (bound)
-        ref_mesh = ref_mesh.scale(scale=scale_to_unit_sphere, center=np.array([0., 0., 0.]))
-        # pose_flip = np.array([[1., 0, 0], [0, 0, -1], [0, 1, 0]])  # [x,y,z]->[x,-z,y]
-        # mesh = mesh.rotate(R=pose_flip, center=np.array([0., 0., 0.]))
-        ref_pc = ref_mesh.sample_points_uniformly(2048)
-        ref_pc = np.asarray(ref_pc.points).astype(np.float32)
-        ref_pcs.append(ref_pc)
-    ref_pcs = np.concatenate(ref_pcs, axis=0)
+        try:
+            print(i)
+            # if i in [21,]:
+            #     continue
+            ref_mesh_path = os.path.join(ref_shape_root, ref_shape_list[i], 'model.obj')
+            ref_mesh = o3d.io.read_triangle_mesh(ref_mesh_path)
+            xyz_min = ref_mesh.get_min_bound().min()
+            xyz_max = ref_mesh.get_max_bound().max()
+            bound = max(abs(xyz_max), abs(xyz_min)) + 0.05
+            scale_to_unit_sphere = 1 / (bound)
+            ref_mesh = ref_mesh.scale(scale=scale_to_unit_sphere, center=np.array([0., 0., 0.]))
+            pose_flip = np.array([[1., 0, 0], [0, 0, -1], [0, 1, 0]])  # [x,y,z]->[x,-z,y]
+            ref_mesh = ref_mesh.rotate(R=pose_flip, center=np.array([0., 0., 0.]))
+            ref_pc = ref_mesh.sample_points_uniformly(2048)
+            ref_pc = np.asarray(ref_pc.points).astype(np.float32)
+            ref_pcs.append(ref_pc)
+        except:
+            continue
+        if len(ref_pcs) >= 101:
+            break
+    ref_pcs = np.stack(ref_pcs, axis=0)
+    sample_pcs = torch.from_numpy(sample_pcs).cuda()
+    ref_pcs = torch.from_numpy(ref_pcs).cuda()
+    # mmd = MMD_EMD_CD(sample_pcs, ref_pcs, batch_size=8)
     metrics = compute_all_metrics(sample_pcs, ref_pcs, batch_size=16, accelerated_cd=True)
     # evaluate_mesh(inp=mesh_path, stl=pc_gt, eval_dir=f"{args.output_path}/tmp/{scene}")
