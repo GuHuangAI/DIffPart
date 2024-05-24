@@ -2070,6 +2070,12 @@ if __name__ == '__main__':
         lr_scheduler.step()
         cur_lr = optimizer.param_groups[0]['lr']
         print(cur_lr)
+        
+    wight_ae = torch.load('/media/huang/T7/data/diff_nerf/ae_kl_d4_96_all/model-13.pt')
+    ckpt = torch.load('/media/huang/T7/data/diff_nerf/guitar_uncond_ddm_ldm8_nerf11/model-current.pt')
+    weight_ae = wight_ae['model']
+    m_weight = ckpt['model']
+    ema_weight = ckpt['ema']
     '''
     # x = torch.rand(1, 4, 128, 128, 128)
     # with torch.no_grad():

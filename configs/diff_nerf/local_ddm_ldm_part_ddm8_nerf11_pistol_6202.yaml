@@ -134,8 +134,8 @@ model:
         rgbnet_full_implicit: False
         rgbnet_depth: 1
         rgbnet_width: 128
-    ckpt_path: "/media/huang/T7/data/diff_nerf/ae_kl_d4_96_2/model-14.pt"
-    # ckpt_path: '/media/huang/T7/data/diff_nerf/ae_kl_d4_96_all/model-13.pt'
+    ckpt_path: "/data1/huang/diff_nerf/result_ae_kl_d4_96_all_6630/model-13.pt"
+    # ckpt_path: '/media/huang/ZX3 512G/data/diff_nerf/result_ae_kl_128x128x128_d4/model-20.pt'
 
   unet:
     class_name: diff_nerf.part_cond_3dunet_sb6.Unet3D
@@ -156,8 +156,8 @@ model:
 data:
   class_name: diff_nerf.data.VolumeDataset
   data_type: 'blender'
-  tar_path: '/media/huang/T7/data/diff_nerf/Vox_96_ShapeNet_v1'
-  image_path: '/media/huang/T7/data/diff_nerf/ShapeNet_v1_Part_Data'
+  tar_path: '/data1/huang/diff_nerf/Vox_96_ShapeNet_v1'
+  image_path: '/data1/huang/diff_nerf/ShapeNet_v1_Part_Data'
   load_rgb_net: False
   load_mask_cache: False
   use_rotate_transform: False
@@ -168,7 +168,7 @@ data:
   sample_num: 5
   normalize: False
   num_objects: 400
-  cls_names: ['03467517']
+  cls_names: ['03642806']
 #  img_size: [64, 64, 64]
 
 trainer:
@@ -179,8 +179,8 @@ trainer:
   save_and_sample_every: 10000
   log_freq: 500
 #  results_folder: '/media/huang/T7/data/diff_nerf/result_ae_kl_64x64x64_d4_mlp3_non_normalize_non_cls'
-  results_folder: '/media/huang/T7/data/diff_nerf/guitar_uncond_ddm_ldm8_nerf11'
-  test_folder: '/media/huang/T7/data/diff_nerf/guitar_uncond_ddm_ldm8_nerf11'
+  results_folder: '/data1/huang/diff_nerf/pistol_uncond_ddm_ldm8_nerf11'
+  test_folder: '/data1/huang/diff_nerf/pistol_uncond_ddm_ldm8_nerf11'
   amp: False
   fp16: False
   test_before: False
@@ -189,6 +189,6 @@ trainer:
   ema_update_every: 8
 
 sampler:
-  save_folder: '/media/huang/T7/data/diff_nerf/sample_guitar'
+  save_folder: '/data1/huang/diff_nerf/sample_pistol'
   export_mesh: True
   export_img: True

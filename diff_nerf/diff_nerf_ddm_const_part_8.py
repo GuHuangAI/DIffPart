@@ -8,6 +8,7 @@ compared to original diff_nerf_ddm_const_part.py
 '''
 import torch
 import torch.nn as nn
+import torchvision as tv
 import math
 import torch.nn.functional as F
 import os
@@ -15,7 +16,7 @@ from diff_nerf.utils import default, identity, normalize_to_neg_one_to_one, unno
 import random
 from einops import rearrange, reduce
 from functools import partial
-#from diff_nerf.mesh_utils import export_meshes_to_path
+from diff_nerf.mesh_utils import export_meshes_to_path
 #from random import random, randint, sample, choice
 from torch.cuda.amp import custom_bwd, custom_fwd
 import numpy as np
@@ -1079,6 +1080,156 @@ class LatentDiffusion(DDPM):
         if export_mesh:
             return rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists
         return rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists
+
+    @torch.no_grad()
+    def render_img_sample_lopp(self, idx, render_kwargs, save_folder, export_img=True, export_mesh=False, **kwargs):
+        device = self.device_buffer.device
+        input = kwargs['input']
+        H, W, focal = render_kwargs.hwf
+        K = np.array([
+            [focal, 0, 0.5 * W],
+            [0, focal, 0.5 * H],
+            [0, 0, 1]
+        ])
+        batch_size = 5
+
+        # Ks = render_kwargs['Ks']
+        ndc = render_kwargs.ndc
+        render_factor = render_kwargs.render_factor
+        if render_factor != 0:
+            # HW = np.copy(HW)
+            # Ks = np.copy(Ks)
+            H = (H / render_factor).astype(int)
+            W = (W / render_factor).astype(int)
+            K[:2, :3] /= render_factor
+
+        #### model ####
+        # idx = input['obj_idx']
+        # idx = list(range(40, 46))  # [5, 6, 7, 8, 9]  # 2, 3 ,4,5,6,7,8,9
+        total_batch = math.ceil(len(idx) / batch_size)
+        n = 0
+        part_fea = self.part_att(self.part_code.weight.unsqueeze(0).repeat(batch_size, 1, 1))
+        for batch_id in range(total_batch):
+            batch_idx = idx[batch_id * batch_size: (batch_id + 1) * batch_size]
+            cur_batch_size = len(batch_idx)
+            # part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[batch_idx])  # B, num_parts, part_fea_dim
+            # part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[batch_idx])  # B, num_parts, part_fea_dim
+
+            # part_shape_code = 1 * self.shape_embs.weight[[1, 1, 1, 1, 1]] #+ 0.5 * self.shape_embs.weight[[1, 2, 3, 4, 0]]  # B, part_fea_dim
+            # part_texture_code = 1 * self.texture_embs.weight[[0,1,2,3,4]] #+ 0.5 * self.texture_embs.weight[[1, 2, 3, 4, 0]]  # B, part_fea_dim
+            # part_texture_code = 1 * self.texture_embs.weight[[2, 3, 6, 7, 8]]
+            # part_shape_fea = self.part_shape_mlp(part_shape_code)  # B, num_parts, part_fea_dim
+            # part_texture_fea = self.part_texture_mlp(part_texture_code)  # B, num_parts, part_fea_dim
+            # part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx])  # B, num_parts, part_fea_dim
+            # part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx])  # B, num_parts, part_fea_dim
+            # batch_size = len(idx)
+            render_pose = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180, 180, 11)[:-1]],
+                                      0)
+            render_poses = [render_pose for _ in range(cur_batch_size)]
+            reconstructions = self.sample(batch_size=cur_batch_size, up_scale=1, cond=None, mask=None, device=device,
+                                          part_shape_fea=part_fea, part_texture_fea=None)
+            # try:
+            #     cls_logits = self.first_stage_model.classifier(reconstructions)
+            #     cls_ids = torch.max(cls_logits, 1)[1]
+            # except:
+            #     cls_ids = None
+            reconstructions = reconstructions * self.std_scale
+            # reconstructions = input
+            rgbss = []
+            partss = []
+            depthss = []
+            bgmapss = []
+            meshes = []
+            part_mesh_lists = []
+            for idx_obj in range(reconstructions.shape[0]):
+                if export_mesh:
+                    mesh, part_mesh_list = self.nerf.export_mesh(reconstructions[idx_obj], part_fea[idx_obj])
+                    export_meshes_to_path(save_folder / 'mesh' / f'{n + idx_obj}', mesh, part_mesh_list)
+                    # meshes.append(mesh)
+                    # part_mesh_lists.append(part_mesh_list)
+                if export_img:
+                    rgbs = []
+                    parts = []
+                    depths = []
+                    bgmaps = []
+                    dens = reconstructions[idx_obj][0]
+                    fea = reconstructions[idx_obj][1:]
+                    # fea = fea + self.first_stage_model.residual(fea.unsqueeze(0))[0]
+                    render_pose = render_poses[idx_obj]
+                    # if cls_ids is not None:
+                    #     render_kwargs['class_id'] = cls_ids[idx_obj].item()
+                    for i, c2w in enumerate(render_pose):
+                        # H, W = HW[i]
+                        # K = Ks[i]
+                        # H, W = HW
+                        # K = Ks
+                        c2w = torch.Tensor(c2w)
+                        rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
+                            H, W, K, c2w, ndc, inverse_y=render_kwargs.inverse_y,
+                            flip_x=render_kwargs.flip_x, flip_y=render_kwargs.flip_y)
+                        keys = ['rgb_marched', 'depth', 'alphainv_last', 'part_marched']
+                        rays_o = rays_o.flatten(0, -2).to(device)
+                        rays_d = rays_d.flatten(0, -2).to(device)
+                        viewdirs = viewdirs.flatten(0, -2).to(device)
+                        render_result_chunks = [
+                            {k: v for k, v in
+                             self.nerf.render_train(dens, fea, ro, rd, vd, batch_idx, part_fea[idx_obj],
+                                                    **render_kwargs).items() if k in keys}
+                            for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
+                        ]
+                        render_result = {
+                            k: torch.cat([ret[k] for ret in render_result_chunks]).reshape(H, W, -1)
+                            for k in render_result_chunks[0].keys()
+                        }
+
+                        if render_kwargs.render_depth:
+                            depth = render_result['depth'].permute(2, 0, 1)
+                            depths.append(depth)
+                        rgb = render_result['rgb_marched'].permute(2, 0, 1)
+                        bgmap = render_result['alphainv_last'].permute(2, 0, 1)
+                        part = render_result['part_marched'].permute(2, 0, 1)
+                        part = torch.argmax(part, dim=0, keepdim=True).to(torch.float)
+                        # part[part == 4] = 0.
+                        # part[part == 3] = 0.25
+                        # part[part == 2] = 0.5
+                        # part[part == 1] = 0.75
+                        # part[part == 0] = 1.
+                        colors = torch.Tensor([
+                            [1, 1, 1],  #
+                            [0, 0, 1],  #
+                            [1, 0, 0],  #
+                            [0, 1, 0],  #
+                            [1, 1, 0]
+                            # Add more colors for other classes as needed
+                        ])
+                        part_rgb = torch.ones((part.shape[1], part.shape[2], 3))
+                        # part = part_rgb.expand(3, part.shape[0], part.shape[1])
+                        for ii in range(len(colors)):
+                            mask = torch.all(part == ii, dim=0)
+                            # mask = part == ii
+                            part_rgb[mask] = colors[ii]
+                        part_rgb = part_rgb.permute(2, 0, 1)
+                        # parts.append(part_rgb)
+                        # rgbs.append(rgb)
+                        # bgmaps.append(bgmap)
+                        tv.utils.save_image(rgb,
+                                            str(save_folder / 'img' / f'obj-{n + idx_obj}-view-{i}-color.png'))
+                        tv.utils.save_image(part_rgb,
+                                            str(save_folder / 'part' / f'obj-{n + idx_obj}-view-{i}-part.png'))
+                    # rgbss.append(rgbs)
+                    # partss.append(parts)
+                    # depthss.append(depths)
+                    # bgmapss.append(bgmaps)
+            n += cur_batch_size
+        # rgbs = np.array(rgbs)
+        # depths = np.array(depths)
+        # bgmaps = np.array(bgmaps)
+        # del model
+        torch.cuda.empty_cache()
+        # if export_mesh:
+        #     return rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists
+        # return rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists
+
 
 class SpecifyGradient(torch.autograd.Function):
     @staticmethod
