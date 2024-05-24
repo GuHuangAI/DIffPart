@@ -154,10 +154,10 @@ def main(args):
                         batch_size = datatmp[key].shape[0]
                         # print(trainer.accelerator.device)
                 if isinstance(trainer.model, nn.parallel.DistributedDataParallel):
-                    rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = trainer.model.module.render_img_sample(batch_size, nerf_cfg, export_mesh=True,
+                    rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = trainer.model.module.render_img_sample(batch_size, nerf_cfg, export_mesh=False,
                                                                                      input=datatmp)
                 elif isinstance(trainer.model, nn.Module):
-                    rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = trainer.model.render_img_sample(batch_size, nerf_cfg, export_mesh=True,
+                    rgbss, depthss, bgmapss, partss, meshes, part_mesh_lists = trainer.model.render_img_sample(batch_size, nerf_cfg, export_mesh=False,
                                                                               input=datatmp,
                                                                                 )
                 # all_images = torch.clamp((all_images + 1.0) / 2.0, min=0.0, max=1.0)
