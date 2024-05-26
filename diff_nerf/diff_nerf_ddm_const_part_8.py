@@ -1173,7 +1173,7 @@ class LatentDiffusion(DDPM):
                         viewdirs = viewdirs.flatten(0, -2).to(device)
                         render_result_chunks = [
                             {k: v for k, v in
-                             self.nerf.render_train(dens, fea, ro, rd, vd, batch_idx, part_fea[idx_obj],
+                             self.nerf.render_train(dens, fea, ro, rd, vd, batch_idx[idx_obj], part_fea[idx_obj],
                                                     **render_kwargs).items() if k in keys}
                             for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
                         ]

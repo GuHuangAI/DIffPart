@@ -26,7 +26,7 @@ model:
   render_start: 20000
   joint_step: 30000
   nerf:
-    class_name: diff_nerf.nerf_module_11.NeRF
+    class_name: diff_nerf.nerf_module_12.NeRF
     num_parts: 4
     part_fea_dim: 128
     maskcache_sampling_step: 30000
@@ -68,7 +68,7 @@ model:
       viewbase_pe: 4
       rgbnet_direct: True
       rgbnet_full_implicit: False
-      rgbnet_depth: 6
+      rgbnet_depth: 12
       rgbnet_width: 128
   first_stage:
     class_name: diff_nerf.ae_kl_3d_3.AutoencoderKL
