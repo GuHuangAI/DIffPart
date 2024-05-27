@@ -1089,3 +1089,22 @@ class DecNet(nn.Module):
         x = self.mlp(x).reshape(self.num_parts, self.part_fea_dim)
         x = self.att(x)
         return x
+
+class RGBNet(nn.Module):
+    def __init__(self, in_fea_dim, hidden_dim, n_layers, out_dim=3):
+        self.in_layer = nn.Linear(in_fea_dim, hidden_dim)
+        assert n_layers % 3 == 0;
+        self.hid_layers = nn.ModuleList()
+        for i in range(n_layers//3):
+            layer = nn.Sequential(*[
+                nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(inplace=True)) for _ in range(3)
+            ])
+            self.hid_layers.append(layer)
+        self.out_layer = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, x):
+        x = self.in_layer(x)
+        for i in range(len(self.hid_layers)):
+            x = self.hid_layers[i](x) + x
+        x = self.out_layer(x)
+        return x

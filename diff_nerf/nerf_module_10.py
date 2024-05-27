@@ -12,11 +12,11 @@ from torch.utils.cpp_extension import load
 from .submodules import PositionEmbeddingSine3D, Mlp
 import pdb
 import time
-#from diff_nerf.mesh_utils import (
-#    MeshGenerator,
-#    export_meshes_to_path,
-#    reconstruct_meshes_from_model,
-#)
+from diff_nerf.mesh_utils import (
+   MeshGenerator,
+   export_meshes_to_path,
+   reconstruct_meshes_from_model,
+)
 parent_dir = os.path.dirname(os.path.abspath(__file__))
 render_utils_cuda = load(
         name='render_utils_cuda',
@@ -27,7 +27,7 @@ render_utils_cuda = load(
 
 ####   DVGO NeRF  ####
 # Compared to nerf_module: remove part shape and part texture features
-# part code in nerf and texture embedding in nerf
+# part code in diffusion and texture embedding in nerf
 # loss with rays, part dense grid, only one mlp
 # cross- and self-attention
 
@@ -72,11 +72,11 @@ class NeRF(nn.Module):
         # part kwargs
         self.num_parts = self.cfg.get('num_parts', 4)
         self.part_fea_dim = self.cfg.get('part_fea_dim', 128)
-        self.part_code = nn.Embedding(self.num_parts, self.part_fea_dim)
+        # self.part_code = nn.Embedding(self.num_parts, self.part_fea_dim)
         self.texture_embs = nn.Embedding(cfg.get("num_shape", 500), self.part_fea_dim)
         nn.init.normal_(self.texture_embs.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
-        nn.init.normal_(self.part_code.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
-        self.part_att = PartAtt(in_dim=self.part_fea_dim)
+        # nn.init.normal_(self.part_code.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
+        # self.part_att = PartAtt(in_dim=self.part_fea_dim)
         self.texture_dec = DecNet(4, self.part_fea_dim, n_layers=3)
         # self.part_embeddings = nn.Embedding(self.num_parts, self.part_fea_dim)
         # nn.init.normal_(self.part_embeddings.weight.data, 0.0, 1.0 / math.sqrt(self.part_fea_dim))
@@ -143,13 +143,14 @@ class NeRF(nn.Module):
         opt_nerf = kwargs['opt_nerf']
         joint_learn = kwargs.get('joint_learn', False)
         idxs = kwargs.get('idx')
+        part_fea = kwargs['part_fea']
         # part_shape_feas = kwargs.get('part_shape_fea')
         # part_text_feas = kwargs.get('part_texture_fea')
         # part_code = kwargs.get('part_code')
         # features = features + self.residual(features)
         loss_weights = kwargs['loss_weight'] if 'loss_weight' in kwargs else torch.ones(len(field),)
-        for dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images, masks, lw, idx in \
-                zip(densities, features, HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss, loss_weights, idxs):
+        for dens, fea, HW, Ks, near, far, i_train, i_val, i_test, poses, images, masks, lw, idx, pf in \
+                zip(densities, features, HWs, Kss, nears, fars, i_trains, i_vals, i_tests, posess, imagess, maskss, loss_weights, idxs, part_fea):
             device = dens.device
             rgb_tr_ori = images.to(device)
             masks = masks.to(device)
@@ -203,7 +204,7 @@ class NeRF(nn.Module):
 
                 # t_n = time.time()
                 # print(t_n - t_cur)
-                render_result = self.render_train(dens, fea, rays_o, rays_d, viewdirs, idx,
+                render_result = self.render_train(dens, fea, rays_o, rays_d, viewdirs, idx, pf,
                                                 **render_kwarg_train)
                 # t_n2 = time.time()
                 # print(t_n2 - t_n)
@@ -508,7 +509,22 @@ class NeRF(nn.Module):
         shape = density.shape
         return dvgo.Raw2Alpha.apply(density.flatten(), self.act_shift, interval).reshape(shape)
 
-    def render_train(self, dens, fea, rays_o, rays_d, viewdirs, idx, **render_kwargs):
+    def get_part_index(self, dens, fea, ray_pts, part_fea, chunk_size=8192):
+        fea_ind = self.index_conv(torch.cat([dens, fea], dim=0), part_fea)
+        fea_ind = self.index_conv2(fea_ind)
+        k1 = self.forward_grid(fea_ind, ray_pts)
+        batch = ray_pts.shape[0]
+        if chunk_size > 0:
+            index_pred = [self.index_mlp(in1, in2) for in1, in2 in zip(k1.unsqueeze(1).split(8192, 0), \
+                                                                       part_fea[None, ::].expand(batch, -1, -1).split(
+                                                                           8192, 0)
+                                                                       )]
+            index_pred = torch.cat(index_pred, dim=0).squeeze(1)  # B, num_parts+1
+        else:
+            index_pred = self.index_mlp(k1.unsqueeze(1), part_fea[None, ::].expand(k1.shape[0], -1, -1)).squeeze(1)
+        return index_pred, k1
+
+    def render_train(self, dens, fea, rays_o, rays_d, viewdirs, idx, pf, **render_kwargs):
         assert len(rays_o.shape) == 2 and rays_o.shape[-1] == 3, 'Only suuport point queries in [N, 3] format'
         # for fie in field:
         ret_dict = {}
@@ -562,13 +578,15 @@ class NeRF(nn.Module):
 
         # query for color
         batch = ray_pts.shape[0]
-        part_code = self.part_att(self.part_code.weight)
+        # part_code = self.part_att(self.part_code.weight)
+        part_fea = pf
 
         k0 = self.forward_grid(fea, ray_pts)
-        fea_ind = self.index_conv(torch.cat([dens.unsqueeze(0), fea], dim=0), part_code)
-        fea_ind = self.index_conv2(fea_ind)
+        index_pred, k1 =self.get_part_index(dens.unsqueeze(0), fea, ray_pts, part_fea)
+        # fea_ind = self.index_conv(torch.cat([dens.unsqueeze(0), fea], dim=0), part_fea)
+        # fea_ind = self.index_conv2(fea_ind)
 
-        k1 = self.forward_grid(fea_ind, ray_pts)
+        # k1 = self.forward_grid(fea_ind, ray_pts)
         # time2 = time.time()
         # print(time2 - time1)
         # rays_xyz = (ray_pts - self.xyz_min) / (self.xyz_max - self.xyz_min)
@@ -576,12 +594,12 @@ class NeRF(nn.Module):
         # xyz_emb = torch.cat([rays_xyz, xyz_emb.sin(), xyz_emb.cos()], -1)
 
         # part_fea = self.part_mlp(self.part_embeddings.weight)
-        index_pred = [self.index_mlp(in1, in2) for in1, in2 in zip(k1.unsqueeze(1).split(8192, 0), \
-                                                                   part_code[None, ::].expand(batch, -1, -1).split(
-                                                                       8192, 0)
-                                                                   )]
+        # index_pred = [self.index_mlp(in1, in2) for in1, in2 in zip(k1.unsqueeze(1).split(8192, 0), \
+        #                                                            part_fea[None, ::].expand(batch, -1, -1).split(
+        #                                                                8192, 0)
+        #                                                            )]
         # index_pred = [self.index_mlp(in1) for in1 in k1.unsqueeze(1).split(8192, 0)]
-        index_pred = torch.cat(index_pred, dim=0).squeeze(1) # B, num_parts+1
+        # index_pred = torch.cat(index_pred, dim=0).squeeze(1) # B, num_parts+1
         # time0 = time.time()
         part_marched = segment_coo(
             src=(weights.unsqueeze(-1) * index_pred),
@@ -688,7 +706,7 @@ class NeRF(nn.Module):
         model_occupancy_callable = partial(
                 self.forward_grid
             )
-        model_index_callable = partial(self.index_mlp)
+        model_index_callable = partial(self.get_part_index)
         mesh, part_meshes_list = reconstruct_meshes_from_model(
             model_occupancy_callable,
             model_index_callable,
