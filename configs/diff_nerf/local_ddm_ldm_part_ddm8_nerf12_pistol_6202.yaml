@@ -183,7 +183,7 @@ trainer:
   test_folder: '/data1/huang/diff_nerf/pistol_uncond_ddm_ldm8_nerf12'
   amp: False
   fp16: False
-  test_before: False
+  test_before: True
   resume_milestone: current
   ema_update_after_step: 10000
   ema_update_every: 8
