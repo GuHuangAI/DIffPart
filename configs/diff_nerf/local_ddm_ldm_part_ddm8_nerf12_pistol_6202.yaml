@@ -167,7 +167,7 @@ data:
   load_mask: False
   sample_num: 5
   normalize: False
-  num_objects: 400
+  num_objects: 200
   cls_names: ['03948459']
 #  img_size: [64, 64, 64]
 
