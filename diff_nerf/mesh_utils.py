@@ -334,7 +334,7 @@ def reconstruct_meshes_from_model(
         [1, 1, 0]])
         for i in range(num_parts):
             part_mesh = mesh_generator.extract_mesh(implicit_field_parts_pred[..., i])
-            part_color_uint8 = np.uint8(part_colors[i] * 255)
+            part_color_uint8 = np.uint8(part_colors[i+1] * 255)
             part_mesh.visual.vertex_colors = part_color_uint8
             part_meshes_list.append(part_mesh)
     return mesh, part_meshes_list
