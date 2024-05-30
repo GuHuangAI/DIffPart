@@ -966,17 +966,18 @@ class LatentDiffusion(DDPM):
 
         #### model ####
         idx = input['obj_idx']
+        idx = [1, 109, 187]
         # idx = list(range(40, 46))# [5, 6, 7, 8, 9]  # 2, 3 ,4,5,6,7,8,9]
-        part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx])  # B, num_parts, part_fea_dim
-        part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx])  # B, num_parts, part_fea_dim
+        # part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx])  # B, num_parts, part_fea_dim
+        # part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx])  # B, num_parts, part_fea_dim
 
 
 
-        # part_shape_code = 1 * self.shape_embs.weight[[1, 1, 1, 1, 1]] #+ 0.5 * self.shape_embs.weight[[1, 2, 3, 4, 0]]  # B, part_fea_dim
-        # part_texture_code = 1 * self.texture_embs.weight[[0,1,2,3,4]] #+ 0.5 * self.texture_embs.weight[[1, 2, 3, 4, 0]]  # B, part_fea_dim
+        part_shape_code = 0.45 * self.shape_embs.weight[[1, 1, 1]] + 0.55 * self.shape_embs.weight[[109, 187, 101]]  # B, part_fea_dim
+        part_texture_code = 0.5 * self.texture_embs.weight[[1, 1, 1]] + 0.5 * self.texture_embs.weight[[109, 187, 101]]  # B, part_fea_dim
         # part_texture_code = 1 * self.texture_embs.weight[[2, 3, 6, 7, 8]]
-        # part_shape_fea = self.part_shape_mlp(part_shape_code)  # B, num_parts, part_fea_dim
-        # part_texture_fea = self.part_texture_mlp(part_texture_code)  # B, num_parts, part_fea_dim
+        part_shape_fea = self.part_shape_mlp(part_shape_code)  # B, num_parts, part_fea_dim
+        part_texture_fea = self.part_texture_mlp(part_texture_code)  # B, num_parts, part_fea_dim
         # part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx])  # B, num_parts, part_fea_dim
         # part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx])  # B, num_parts, part_fea_dim
         batch_size = len(idx)

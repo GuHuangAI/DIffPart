@@ -24,12 +24,12 @@ model:
   weighting_loss: True
   use_render_loss: True
   render_start: 20000
-  joint_step: 30000
+  joint_step: 25000
   nerf:
     class_name: diff_nerf.nerf_module_12.NeRF
     num_parts: 4
     part_fea_dim: 128
-    maskcache_sampling_step: 30000
+    maskcache_sampling_step: 25000
     hwf: [ 800, 800, 1111.1113654242622 ]  # default hwf
     near: 2
     far: 4
@@ -44,7 +44,7 @@ model:
     render_mask: False
     rotate_flag: False
     N_rand: 8192
-    inner_iter: 1
+    inner_iter: 5
     inner_iter_indep: 50
     weight_main: 1. # 1 default
     weight_entropy_last: 0.001 # 0.001 default
@@ -161,7 +161,7 @@ data:
   load_rgb_net: False
   load_mask_cache: False
   use_rotate_transform: False
-  batch_size: 2
+  batch_size: 1
   white_bkgd: True
   load_render_kwargs: True
   load_mask: False

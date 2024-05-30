@@ -179,7 +179,7 @@ trainer:
   log_freq: 500
 #  results_folder: '/media/huang/T7/data/diff_nerf/result_ae_kl_64x64x64_d4_mlp3_non_normalize_non_cls'
   results_folder: '/media/huang/T7/data/diff_nerf/result_uncond_ddm_ldm_part_nerf7'
-  test_folder: '/media/huang/T7/data/diff_nerf/result_uncond_ddm_ldm_part_nerf7_test7'
+  test_folder: '/media/huang/T7/data/diff_nerf/result_uncond_ddm_ldm_part_nerf7_test8'
   amp: False
   fp16: False
   test_before: True

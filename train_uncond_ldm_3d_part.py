@@ -162,7 +162,7 @@ def main(args):
                                                                                 )
                 # all_images = torch.clamp((all_images + 1.0) / 2.0, min=0.0, max=1.0)
             for i, (mesh, part_mesh_list) in enumerate(zip(meshes, part_mesh_lists)):
-                export_meshes_to_path(trainer.results_folder / 'mesh' / f'{i}', mesh, part_mesh_list)
+                export_meshes_to_path(trainer.test_folder / 'mesh' / f'{i}', mesh, part_mesh_list)
             # all_images = torch.cat(all_images_list, dim = 0)
             for j in range(len(rgbss)):
                 rgbs = rgbss[j]
