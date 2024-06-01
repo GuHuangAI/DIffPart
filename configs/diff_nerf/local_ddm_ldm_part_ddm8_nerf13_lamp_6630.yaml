@@ -44,7 +44,7 @@ model:
     render_mask: False
     rotate_flag: False
     N_rand: 8192
-    inner_iter: 4
+    inner_iter: 2
     inner_iter_indep: 50
     weight_main: 1. # 1 default
     weight_entropy_last: 0.001 # 0.001 default
