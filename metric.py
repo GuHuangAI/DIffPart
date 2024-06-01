@@ -376,9 +376,9 @@ if __name__ == '__main__':
     # print(mmd, cov)
     import open3d as o3d
 
-    sample_shape_root = '/media/huang/T7/data/diff_nerf/sample_car/mesh/'
-    ref_shape_root = '/media/huang/T7/data/ShapeNetCore_v1/02958343/'
-    ref_render_root = '/media/huang/T7/data/diff_nerf/ShapeNet_v1_Part_Data/02958343/'
+    sample_shape_root = '/media/huang/T7/data/diff_nerf/sample_guitar/mesh/'
+    ref_shape_root = '/media/huang/T7/data/ShapeNetCore_v1/03467517/'
+    ref_render_root = '/media/huang/T7/data/diff_nerf/ShapeNet_v1_Part_Data/03467517/'
     sample_pcs = []
     ref_pcs = []
     sample_shape_list = os.listdir(sample_shape_root)

@@ -740,6 +740,7 @@ class LatentDiffusion(DDPM):
             x_rec_dec = self.first_stage_model.decode(x_rec / self.scale_factor)
         # class_id = batch["class_id"]
         x_rec_dec = SpecifyGradient2.apply(x_rec, x_rec_dec)
+        # SpecifyGradient3.apply(x_rec, x_rec_dec)
         if self.cfg.nerf.weight_tv > 0:
             grid = x_rec_dec * self.std_scale
             loss_tv = self.total_variation(grid) * self.cfg.nerf.weight_tv
@@ -1264,6 +1265,23 @@ class SpecifyGradient2(torch.autograd.Function):
         # pdb.set_trace()
         grad_scale = F.interpolate(grad_scale, size=gt_grad.shape[-3:], mode="trilinear")
         return grad_scale, None
+
+class SpecifyGradient3(torch.autograd.Function):
+    @staticmethod
+    @custom_fwd
+    def forward(ctx, input_tensor, out_tensor):
+        ctx.save_for_backward(out_tensor)
+        # we return a dummy value 1, which will be scaled by amp's scaler so we get the scale in backward.
+        return torch.ones(input_tensor.shape, device=input_tensor.device, dtype=input_tensor.dtype)
+        # return out_tensor
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, grad_scale):
+        (gt_grad,) = ctx.saved_tensors
+        # pdb.set_trace()
+        gt_grad = grad_scale
+        return gt_grad, None
 
 class PartAtt(nn.Module):
     def __init__(self, in_dim, out_dim=128, n_layers=3):
