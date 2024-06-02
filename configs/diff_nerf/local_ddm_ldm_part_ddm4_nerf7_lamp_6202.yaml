@@ -168,6 +168,7 @@ data:
   sample_num: 5
   normalize: False
   num_objects: 100
+  cls_names: ['03636649']
 #  img_size: [64, 64, 64]
 
 trainer:
@@ -182,7 +183,7 @@ trainer:
   test_folder: '/data1/huang/diff_nerf/lamp_uncond_ddm_ldm_part_ddm4_nerf7'
   amp: False
   fp16: False
-  test_before: True
+  test_before: False
   resume_milestone: current
   ema_update_after_step: 10000
   ema_update_every: 8
