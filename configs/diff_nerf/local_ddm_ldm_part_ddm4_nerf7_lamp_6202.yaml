@@ -134,7 +134,7 @@ model:
         rgbnet_full_implicit: False
         rgbnet_depth: 1
         rgbnet_width: 128
-    ckpt_path: '/data1/huang/diff_nerf/ae_kl_d4_96_all/model-13.pt'
+    ckpt_path: "/data1/huang/diff_nerf/result_ae_kl_d4_96_all_6630/model-13.pt"
     # ckpt_path: '/media/huang/ZX3 512G/data/diff_nerf/result_ae_kl_128x128x128_d4/model-20.pt'
 
   unet:
