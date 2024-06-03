@@ -227,7 +227,7 @@ class MeshGenerator:
 
     def get_mise_predictions_per_part(
         self, model, model_index, num_parts, chunk_size: int,
-            density: torch.Tensor, fea: torch.Tensor, part_fea: torch.Tensor
+            density: torch.Tensor, fea: torch.Tensor, part_fea
     ) -> np.ndarray:
         # MISE - note this is working only for a batch of size 1!
         per_part_fields = []
@@ -304,7 +304,7 @@ def reconstruct_meshes_from_model(
     chunk_size: int,
     density: torch.Tensor,
     fea: torch.Tensor,
-    part_fea: torch.Tensor,
+    part_fea,
     with_parts: bool = False,
     num_parts: int = None,
 ):

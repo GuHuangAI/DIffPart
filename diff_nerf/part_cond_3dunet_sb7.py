@@ -547,7 +547,7 @@ class Unet3D(nn.Module):
         #                          std=[0.2686, 0.2613, 0.2758])
         # ])
         # self.img_encoder = swin_s(weights=Swin_S_Weights)
-        self.clip, _ = clip.load('VIT', device='cpu')
+        self.clip, _ = clip.load('ViT-B/16', device='cpu')
 
         # cond embedding
         self.cond_mlps = nn.ModuleList([])
@@ -662,7 +662,7 @@ class Unet3D(nn.Module):
         # img_emb = self.img_encoder(image)
         text_embs = []
         for i, layer in enumerate(self.projects):
-            text_embs.append(layer(text_emb[i]))
+            text_embs.append(layer(text_emb))
 
         h = []
         # h2 = []
@@ -672,7 +672,7 @@ class Unet3D(nn.Module):
             x = block1(x, t)
             h.append(x)
             # h2.append(x.clone())
-            x = relation_layer(x, torch.cat([part_embs[i], text_embs[i]], dim=1))
+            x = relation_layer(x, torch.cat([part_embs[i], text_embs[i].unsqueeze(1)], dim=1))
             x = block2(x, t)
             x = attn(x)
             h.append(x)
@@ -690,7 +690,7 @@ class Unet3D(nn.Module):
         for (block1, block2, attn, upsample), relation_layer in zip(self.ups, self.relations_up):
             x = torch.cat((x, h.pop()), dim = 1)
             x = block1(x, t)
-            x = relation_layer(x, torch.cat([part_embs.pop(), text_embs.pop()], dim=1))
+            x = relation_layer(x, torch.cat([part_embs.pop(), text_embs.pop().unsqueeze(1)], dim=1))
             x = torch.cat((x, h.pop()), dim = 1)
             x = block2(x, t)
             x = attn(x)

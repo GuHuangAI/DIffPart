@@ -21,6 +21,7 @@ import math
 import cv2
 import imageio
 from torchvision import transforms
+import clip
 np_str_obj_array_pattern = re.compile(r'[SaUO]')
 # angle_list = [0, 45, 90, 135, 180, 225, 270, 315, ] # not 90 * n may generate error reconstruction
 angle_list = [0, 90, 180, 270, ]  # rotate angles
@@ -82,7 +83,7 @@ def max_min_unnormalize(x, maxm, minm, new_maxm=1, new_minm=-1):
 class VolumeDataset(data.Dataset):
     def __init__(self, tar_path, image_path, part_path=None, load_rgb_net=False, maxm=191.3546, minm=-258.9259,
                  use_rotate_transform=True, load_mask_cache=False, scale_factor=1, normalize=False,
-                 sample_num=5, split='train', load_render_kwargs=False, load_mask=False,
+                 sample_num=5, split='train', load_render_kwargs=False, load_mask=False, load_text=False,
                  cfg={}, **kwargs):
         super(VolumeDataset, self).__init__()
         self.tar_path = Path(tar_path)
@@ -103,6 +104,7 @@ class VolumeDataset(data.Dataset):
         # self.cls_names = os.listdir(self.tar_path)
         self.cls_names = cfg.get('cls_names', ['03001627'])
         select_num = cfg.get("num_objects", 500)
+        self.select_num = select_num
         for cls_name in self.cls_names:
             self.obj_names[cls_name] = os.listdir(self.tar_path / cls_name)[:select_num]
             # self.obj_total_num += len(os.listdir(self.tar_path / cls_name))
@@ -119,6 +121,9 @@ class VolumeDataset(data.Dataset):
         self.use_rotate_transform = use_rotate_transform
         self.load_render_kwargs = load_render_kwargs
         self.load_mask = load_mask
+        self.load_text = load_text
+        if load_text:
+            self.tokenizer = lambda text: clip.tokenize([text], truncate=True)[0]
 
     def __len__(self):
         return self.obj_total_num
@@ -135,9 +140,20 @@ class VolumeDataset(data.Dataset):
     def __getitem__(self, idx):
         # print(idx)
         res = {}
-        cls_idx, obj_idx = self.find_idx(idx)
-        cls_name = self.cls_names[cls_idx]
-        obj_name = self.obj_names[cls_name][obj_idx]
+        while True:
+            try:
+                cls_idx, obj_idx = self.find_idx(idx)
+                cls_name = self.cls_names[cls_idx]
+                obj_name = self.obj_names[cls_name][obj_idx]
+                if self.load_text:
+                    text_all = json.load(open(self.image_path / 'text_part.json'))[cls_name][obj_name]
+                    text = random.choice(text_all)
+                    text_emb = self.tokenizer(text)
+                    res['text'] = text_emb
+                break
+            except:
+                idx = random.choice(range(self.select_num))
+
         obj_tar_path = self.tar_path / cls_name / obj_name / 'fine_last.tar'
         obj_tar = torch.load(str(obj_tar_path), map_location=lambda storage, loc: storage)
         obj_weight = obj_tar['model_state_dict']
@@ -231,6 +247,7 @@ class VolumeDataset(data.Dataset):
             res['ref_img'] = render_kwargs['ref_img']
             render_kwargs.pop('ref_img')
             res['render_kwargs'] = render_kwargs
+
         return res
 
 def load_blender_data(basedir, half_res=False, sample_num=5, split='train'):
