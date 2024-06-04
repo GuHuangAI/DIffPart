@@ -886,14 +886,14 @@ class LatentDiffusion(DDPM):
 
     @torch.no_grad()
     def sample(self, batch_size=16, up_scale=1, cond=None, mask=None, denoise=True, device=None,
-               part_shape_fea=None, part_texture_fea=None, image=None):
+               part_shape_fea=None, part_texture_fea=None, text=None):
         image_size, channels = self.image_size, self.channels
         if cond is not None:
             batch_size = cond.shape[0]
         down_ratio = self.first_stage_model.down_ratio
         z = self.sample_fn((batch_size, channels, image_size[0] // down_ratio, image_size[1] // down_ratio, image_size[2] // down_ratio),
                            up_scale=up_scale, unnormalize=False, cond=cond, denoise=denoise, device=device,
-                           part_shape_fea=part_shape_fea, part_texture_fea=part_texture_fea, image=image,
+                           part_shape_fea=part_shape_fea, part_texture_fea=part_texture_fea, text=text,
                            )
 
         if self.scale_by_std:
@@ -911,7 +911,7 @@ class LatentDiffusion(DDPM):
 
     @torch.no_grad()
     def sample_fn(self, shape, up_scale=1, unnormalize=True, cond=None, denoise=False,
-                  device=None, part_shape_fea=None, part_texture_fea=None, image=None):
+                  device=None, part_shape_fea=None, part_texture_fea=None, text=None):
         batch, device, total_timesteps, sampling_timesteps, objective = shape[0], \
             device, self.num_timesteps, self.sampling_timesteps, self.objective
 
@@ -942,7 +942,7 @@ class LatentDiffusion(DDPM):
             if cond is not None:
                 pred = self.model(img, cur_time, cond)
             else:
-                pred = self.model(img, cur_time, cond1=part_shape_fea, cond2=None, image=image)
+                pred = self.model(img, cur_time, cond1=part_shape_fea, cond2=None, text=text)
             # C, noise = pred.chunk(2, dim=1)
             C, noise = pred[:2]
             if self.scale_by_softsign:
@@ -966,7 +966,7 @@ class LatentDiffusion(DDPM):
     def render_img_sample(self, batch_size, render_kwargs, export_mesh=False, **kwargs):
         device = self.device_buffer.device
         input = kwargs['input']
-        # ref_img = input['ref_img']
+        text = input['text']
         H, W, focal = render_kwargs.hwf
         K = np.array([
             [focal, 0, 0.5 * W],
@@ -994,12 +994,13 @@ class LatentDiffusion(DDPM):
         # part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[idx])  # B, num_parts, part_fea_dim
         # part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[idx])  # B, num_parts, part_fea_dim
         reconstructions = self.sample(batch_size=batch_size, up_scale=1, cond=None, mask=None, device=device,
-                                      part_shape_fea=part_fea, part_texture_fea=None)
+                                      part_shape_fea=part_fea, part_texture_fea=None, text=text)
         # try:
         #     cls_logits = self.first_stage_model.classifier(reconstructions)
         #     cls_ids = torch.max(cls_logits, 1)[1]
         # except:
         #     cls_ids = None
+        text_emb = self.model.clip.encode_text(text)
         reconstructions = reconstructions * self.std_scale
         # reconstructions = input
         rgbss = []
@@ -1010,7 +1011,7 @@ class LatentDiffusion(DDPM):
         part_mesh_lists = []
         for idx_obj in range(reconstructions.shape[0]):
             if export_mesh:
-                mesh, part_mesh_list = self.nerf.export_mesh(reconstructions[idx_obj], part_fea[idx_obj])
+                mesh, part_mesh_list = self.nerf.export_mesh(reconstructions[idx_obj], (part_fea[idx_obj], text_emb[idx_obj]))
                 meshes.append(mesh)
                 part_mesh_lists.append(part_mesh_list)
             rgbs = []
@@ -1039,7 +1040,7 @@ class LatentDiffusion(DDPM):
                 viewdirs = viewdirs.flatten(0, -2).to(device)
                 render_result_chunks = [
                     {k: v for k, v in
-                     self.nerf.render_train(dens, fea, ro, rd, vd, idx, part_fea[idx_obj], **render_kwargs).items() if k in keys}
+                     self.nerf.render_train(dens, fea, ro, rd, vd, idx, part_fea[idx_obj], text_emb[idx_obj], **render_kwargs).items() if k in keys}
                     for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
                 ]
                 render_result = {
