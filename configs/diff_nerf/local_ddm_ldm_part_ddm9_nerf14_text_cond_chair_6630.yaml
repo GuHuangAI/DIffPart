@@ -24,12 +24,12 @@ model:
   weighting_loss: True
   use_render_loss: True
   render_start: 15000
-  joint_step: 20000
+  joint_step: 19000
   nerf:
     class_name: diff_nerf.nerf_module_14.NeRF
     num_parts: 4
     part_fea_dim: 128
-    maskcache_sampling_step: 20000
+    maskcache_sampling_step: 19000
     hwf: [ 800, 800, 1111.1113654242622 ]  # default hwf
     near: 2
     far: 4

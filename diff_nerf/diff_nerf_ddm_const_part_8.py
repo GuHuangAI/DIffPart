@@ -1109,10 +1109,11 @@ class LatentDiffusion(DDPM):
         # idx = list(range(40, 46))  # [5, 6, 7, 8, 9]  # 2, 3 ,4,5,6,7,8,9
         total_batch = math.ceil(len(idx) / batch_size)
         n = 0
-        part_fea = self.part_att(self.part_code.weight.unsqueeze(0).repeat(batch_size, 1, 1))
+        # part_fea = self.part_att(self.part_code.weight.unsqueeze(0).repeat(batch_size, 1, 1))
         for batch_id in range(total_batch):
             batch_idx = idx[batch_id * batch_size: (batch_id + 1) * batch_size]
             cur_batch_size = len(batch_idx)
+            part_fea = self.part_att(self.part_code.weight.unsqueeze(0).repeat(cur_batch_size, 1, 1))
             # part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[batch_idx])  # B, num_parts, part_fea_dim
             # part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[batch_idx])  # B, num_parts, part_fea_dim
 
