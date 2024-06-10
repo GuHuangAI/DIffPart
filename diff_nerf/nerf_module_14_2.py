@@ -92,7 +92,7 @@ class NeRF(nn.Module):
         #                             win_size=[8, 8, 8])
         self.text_mlp = nn.Linear(512, 16)
         nn.init.constant_(self.text_mlp.bias, 0)
-        self.index_conv = IndexConvMSWA(in_dim=64+1,
+        self.index_conv = IndexConvMSWA(in_dim=5+1,
                                     part_dim=self.part_fea_dim,
                                     hidden_dim=64,
                                     win_size=[8, 8, 8])
