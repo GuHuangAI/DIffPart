@@ -555,11 +555,11 @@ class Unet3D(nn.Module):
         self.cond_mlps.append(nn.Sequential(
             nn.Linear(part_dim, dims[0]), nn.LayerNorm(dims[0])))
         self.cond_mlps.append(nn.Sequential(
-            nn.Linear(part_dim, dims[0]), nn.LayerNorm(dims[1])))
+            nn.Linear(part_dim, dims[1]), nn.LayerNorm(dims[1])))
         self.cond_mlps.append(nn.Sequential(
-            nn.Linear(part_dim, dims[0]), nn.LayerNorm(dims[2])))
+            nn.Linear(part_dim, dims[2]), nn.LayerNorm(dims[2])))
         self.cond_mlps.append(nn.Sequential(
-            nn.Linear(part_dim, dims[0]), nn.LayerNorm(dims[3])))
+            nn.Linear(part_dim, dims[3]), nn.LayerNorm(dims[3])))
 
         # image embedding
         self.projects = nn.ModuleList([])
@@ -567,11 +567,11 @@ class Unet3D(nn.Module):
         self.projects.append(nn.Sequential(
             nn.Linear(f_condnet, dims[0]), nn.LayerNorm(dims[0])))
         self.projects.append(nn.Sequential(
-            nn.Linear(f_condnet, dims[0]), nn.LayerNorm(dims[1])))
+            nn.Linear(f_condnet, dims[1]), nn.LayerNorm(dims[1])))
         self.projects.append(nn.Sequential(
-            nn.Linear(f_condnet, dims[0]), nn.LayerNorm(dims[2])))
+            nn.Linear(f_condnet, dims[2]), nn.LayerNorm(dims[2])))
         self.projects.append(nn.Sequential(
-            nn.Linear(f_condnet, dims[0]), nn.LayerNorm(dims[3])))
+            nn.Linear(f_condnet, dims[3]), nn.LayerNorm(dims[3])))
 
         # layers
         self.downs = nn.ModuleList([])

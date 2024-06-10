@@ -4,7 +4,7 @@ model:
   part_fea_dim: 128
   image_size: [ 96, 96, 96 ]
   std_scale: 3.5
-  ckpt_path: /media/huang/T7/data/diff_nerf/guitar_uncond_ddm_ldm8_nerf11/model-2-tmp.pt
+  ckpt_path:
   ignore_keys: [ ]
   only_model: False
   timesteps: 1000
@@ -23,13 +23,13 @@ model:
   eps: !!float 1e-3
   weighting_loss: True
   use_render_loss: True
-  render_start: 0
-  joint_step: 10000
+  render_start: 15000
+  joint_step: 19000
   nerf:
     class_name: diff_nerf.nerf_module_14.NeRF
     num_parts: 4
     part_fea_dim: 128
-    maskcache_sampling_step: 10000
+    maskcache_sampling_step: 19000
     hwf: [ 800, 800, 1111.1113654242622 ]  # default hwf
     near: 2
     far: 4
@@ -44,7 +44,7 @@ model:
     render_mask: False
     rotate_flag: False
     N_rand: 8192
-    inner_iter: 2
+    inner_iter: 1
     inner_iter_indep: 50
     weight_main: 1. # 1 default
     weight_entropy_last: 0.001 # 0.001 default
@@ -68,7 +68,7 @@ model:
       viewbase_pe: 4
       rgbnet_direct: True
       rgbnet_full_implicit: False
-      rgbnet_depth: 12
+      rgbnet_depth: 9
       rgbnet_width: 128
   first_stage:
     class_name: diff_nerf.ae_kl_3d_3.AutoencoderKL
@@ -134,7 +134,7 @@ model:
         rgbnet_full_implicit: False
         rgbnet_depth: 1
         rgbnet_width: 128
-    ckpt_path: '/media/huang/T7/data/diff_nerf/ae_kl_d4_96_all/model-13.pt'
+    ckpt_path: #"/data/huang/diff_nerf/result_ae_kl_d4_96_all_6630/model-13.pt"
 
   unet:
     class_name: diff_nerf.part_cond_3dunet_sb7.Unet3D
@@ -160,14 +160,14 @@ data:
   load_rgb_net: False
   load_mask_cache: False
   use_rotate_transform: False
-  batch_size: 2
+  batch_size: 5
   white_bkgd: True
   load_render_kwargs: True
   load_mask: False
   load_text: True
   sample_num: 5
   normalize: False
-  num_objects: 400
+  num_objects: 300
   cls_names: ['03001627']
 #  img_size: [64, 64, 64]
 
@@ -183,12 +183,12 @@ trainer:
   test_folder: '/media/huang/T7/data/diff_nerf/chair_uncond_ddm_ldm9_nerf14_text_cond'
   amp: False
   fp16: False
-  test_before: False
-  resume_milestone: current
+  test_before: True
+  resume_milestone: 3
   ema_update_after_step: 10000
   ema_update_every: 8
 
 sampler:
-  save_folder: '/media/huang/T7/data/diff_nerf/sample_guitar'
+  save_folder: '/media/huang/T7/data/diff_nerf/sample_chair_text'
   export_mesh: True
   export_img: True
