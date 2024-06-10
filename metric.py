@@ -376,9 +376,9 @@ if __name__ == '__main__':
     # print(mmd, cov)
     import open3d as o3d
 
-    sample_shape_root = '/media/huang/T7/data/diff_nerf/sample_guitar/mesh/'
-    ref_shape_root = '/media/huang/T7/data/ShapeNetCore_v1/03467517/'
-    ref_render_root = '/media/huang/T7/data/diff_nerf/ShapeNet_v1_Part_Data/03467517/'
+    sample_shape_root = '/media/huang/T7/data/diff_nerf/sample_lamp/mesh/'
+    ref_shape_root = '/media/huang/T7/data/ShapeNetCore_v1/03636649/'
+    ref_render_root = '/media/huang/T7/data/diff_nerf/ShapeNet_v1_Part_Data/03636649/'
     sample_pcs = []
     ref_pcs = []
     sample_shape_list = os.listdir(sample_shape_root)
@@ -394,7 +394,7 @@ if __name__ == '__main__':
     for i in range(len(ref_shape_list)):
         try:
             print(i)
-            # if i in [38,]:
+            # if i in [21,]:
             #     continue
             ref_mesh_path = os.path.join(ref_shape_root, ref_shape_list[i], 'model.obj')
             ref_mesh = o3d.io.read_triangle_mesh(ref_mesh_path)

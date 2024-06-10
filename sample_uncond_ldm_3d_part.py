@@ -145,7 +145,7 @@ def main(args):
     )
     sample_cfg = cfg.sampler
     # idx = range(200, 400)
-    idx = range(0, 101)
+    idx = range(300, 400)
     save_folder = Path(sample_cfg.save_folder)
     save_folder.mkdir(exist_ok=True)
     (save_folder / 'mesh').mkdir(exist_ok=True)
@@ -162,14 +162,14 @@ def main(args):
                 trainer.model.module.render_img_sample_lopp(
                     idx, nerf_cfg, save_folder, export_mesh=sample_cfg.export_mesh,
                     export_img=sample_cfg.export_img,
-                    input=datatmp)
+                    input=datatmp, ds=dataset)
             elif isinstance(trainer.model, nn.Module):
                 trainer.model.render_img_sample_lopp(idx,
                                                    nerf_cfg,
                                                    save_folder,
                                                    export_mesh=sample_cfg.export_mesh,
                                                    export_img=sample_cfg.export_img,
-                                                   input=datatmp,
+                                                   input=datatmp, ds=dataset
                                                    )
     '''
     if train_cfg.test_before:

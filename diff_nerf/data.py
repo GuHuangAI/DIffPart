@@ -150,6 +150,7 @@ class VolumeDataset(data.Dataset):
                     text = random.choice(text_all)
                     text_emb = self.tokenizer(text)
                     res['text'] = text_emb
+                    res['text_str'] = text
                 break
             except:
                 idx = random.choice(range(self.select_num))

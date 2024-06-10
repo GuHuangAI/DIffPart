@@ -32,7 +32,7 @@ render_utils_cuda = load(
 # cross- and self-attention
 # remove texture embedding in nerf
 # RGBNet
-# part code for rgb prediction
+# text embedding conduct attention
 
 class NeRF(nn.Module):
     def __init__(self, cfg, **kwargs):
@@ -86,6 +86,12 @@ class NeRF(nn.Module):
         # self.part_mlp = nn.Linear(self.part_fea_dim, self.part_fea_dim)
         # self.part_mlp = PartAtt(self.part_fea_dim, self.part_fea_dim, n_layers=4)
         # dim_index = 3 + 3 * viewbase_pe * 2
+        # self.text_att = TextMSWA(in_dim=5,
+        #                             part_dim=512,
+        #                             hidden_dim=64,
+        #                             win_size=[8, 8, 8])
+        self.text_mlp = nn.Linear(512, 16)
+        nn.init.constant_(self.text_mlp.bias, 0)
         self.index_conv = IndexConvMSWA(in_dim=64+1,
                                     part_dim=self.part_fea_dim,
                                     hidden_dim=64,
@@ -98,9 +104,9 @@ class NeRF(nn.Module):
                                   part_dim=self.part_fea_dim, hidden_dim=64, n_layers=4)
 
         # dim0 += self.part_fea_dim
-        self.feat_mlp = RelateMLP(in_dim=pos_dim+self.cfg.dvgo.rgbnet_dim, out_dim=self.part_fea_dim,
-                                  part_dim=self.part_fea_dim, n_layers=3)
-        self.rgbnet = RGBNet(self.part_fea_dim,
+        # self.feat_mlp = RelateMLP(in_dim=pos_dim+self.cfg.dvgo.rgbnet_dim, out_dim=self.part_fea_dim,
+        #                           part_dim=self.part_fea_dim, n_layers=3)
+        self.rgbnet = RGBNet(pos_dim+self.cfg.dvgo.rgbnet_dim+16,
                              hidden_dim=rgbnet_width, out_dim=3,
                              n_layers=rgbnet_depth)
         nn.init.constant_(self.rgbnet.out_layer.bias, 0)
@@ -509,6 +515,8 @@ class NeRF(nn.Module):
         return dvgo.Raw2Alpha.apply(density.flatten(), self.act_shift, interval).reshape(shape)
 
     def get_part_index(self, dens, fea, ray_pts, part_fea, chunk_size=8192):
+        part_fea, text_fea = part_fea
+        # fea = self.text_att(fea, text_fea)
         fea_ind = self.index_conv(torch.cat([dens, fea], dim=0), part_fea)
         fea_ind = self.index_conv2(fea_ind)
         k1 = self.forward_grid(fea_ind, ray_pts)
@@ -523,7 +531,7 @@ class NeRF(nn.Module):
             index_pred = self.index_mlp(k1.unsqueeze(1), part_fea[None, ::].expand(k1.shape[0], -1, -1)).squeeze(1)
         return index_pred, fea
 
-    def render_train(self, dens, fea, rays_o, rays_d, viewdirs, idx, pf, **render_kwargs):
+    def render_train(self, dens, fea, rays_o, rays_d, viewdirs, idx, pf, tf, **render_kwargs):
         assert len(rays_o.shape) == 2 and rays_o.shape[-1] == 3, 'Only suuport point queries in [N, 3] format'
         # for fie in field:
         ret_dict = {}
@@ -579,7 +587,9 @@ class NeRF(nn.Module):
         batch = ray_pts.shape[0]
         # part_code = self.part_att(self.part_code.weight)
         part_fea = pf
-        index_pred, _ = self.get_part_index(dens.unsqueeze(0), fea, ray_pts, part_fea)
+        text_fea = tf
+        part_fea = (part_fea, text_fea)
+        index_pred, fea = self.get_part_index(dens.unsqueeze(0), fea, ray_pts, part_fea)
 
         k0 = self.forward_grid(fea, ray_pts)
         # fea_ind = self.index_conv(torch.cat([dens.unsqueeze(0), fea], dim=0), part_fea)
@@ -621,16 +631,17 @@ class NeRF(nn.Module):
                 viewdirs_emb = torch.cat([viewdirs, viewdirs_emb.sin(), viewdirs_emb.cos()], -1)
                 viewdirs_emb = viewdirs_emb.flatten(0, -2)[ray_id]
                 # k0_view = torch.cat([k0_view, viewdirs_emb], -1)
-                k0_view = torch.cat([k0, viewdirs_emb], -1)
+                text_fea = self.text_mlp(text_fea)
+                k0_view = torch.cat([text_fea, k0, viewdirs_emb], -1)
                 # texture_code = self.texture_embs.weight[idx]
                 # texture_code = self.texture_dec(texture_code)
-                rgb_feat = [self.feat_mlp(in1, in2) for in1, in2 in zip(k0_view.unsqueeze(1).split(8192, 0), \
-                                                           part_fea[None, ::].expand(batch, -1, -1).split(8192, 0)
-                                                        )]
-                rgb_feat = torch.cat(rgb_feat, dim=0).squeeze(1)
-                rgb_logit = self.rgbnet(rgb_feat)
+                # rgb_feat = [self.feat_mlp(in1, in2) for in1, in2 in zip(k0_view.unsqueeze(1).split(8192, 0), \
+                #                                            texture_code[None, ::].expand(batch, -1, -1).split(8192, 0)
+                #                                         )]
+                # rgb_feat = torch.cat(rgb_feat, dim=0).squeeze(1)
+                # rgb_logit = self.rgbnet(rgb_feat)
 
-                # rgb_logit = self.rgbnet(k0_view)
+                rgb_logit = self.rgbnet(k0_view)
                 # time2 = time.time()
                 # print(time2 - time1)
                 if self.cfg.dvgo.rgbnet_direct:
@@ -957,6 +968,58 @@ class IndexConvMSWA2(nn.Module):
         out = shortcut + self.out_layer(q_s)
         return out[0] # C, X, Y, Z
 
+class TextMSWA(nn.Module):
+    def __init__(self, in_dim, hidden_dim=128, part_dim=128, heads=4, win_size=[8, 8, 8]):
+        super(TextMSWA, self).__init__()
+        self.in_layer = nn.Sequential(
+            nn.Conv3d(in_dim, hidden_dim, 1),
+            nn.GroupNorm(8, hidden_dim)
+        )
+        self.in_layer_part = nn.Linear(part_dim, hidden_dim)
+        self.heads = heads
+        self.q_lin = nn.Linear(hidden_dim, hidden_dim, 1)
+        self.k_lin = nn.Linear(hidden_dim, hidden_dim, 1)
+        self.v_lin = nn.Linear(hidden_dim, hidden_dim, 1)
+        self.act = nn.ReLU()
+        self.out_layer = nn.Sequential(
+            nn.Conv3d(hidden_dim, hidden_dim, 1),
+            nn.GroupNorm(8, hidden_dim)
+        )
+        self.pos_enc = PositionEmbeddingSine3D(hidden_dim)
+        self.avgpool_q = nn.AdaptiveAvgPool3d(output_size=win_size)
+        self.softmax = nn.Softmax(dim=-1)
+        self.mlp = Mlp(in_features=hidden_dim, hidden_features=hidden_dim * 2, drop=0.)
+        self.win_size = win_size
+
+    def forward(self, x, text_f):
+        # x: C, X, Y, Z;  text_f: C
+        text_f = text_f.reshape(1, -1)
+        shortcut = self.in_layer(x.unsqueeze(0)) # 1, C, X, Y, Z
+        B, C, X, Y, Z = shortcut.shape
+        q_s = self.avgpool_q(shortcut)
+        qg = self.avgpool_q(shortcut).permute(0, 2, 3, 4, 1).contiguous()
+        qg = qg + self.pos_enc(qg)
+        qg = qg.view(1, -1, C)
+
+        num_parts = text_f.shape[0]
+        part_f = self.in_layer_part(text_f)
+        num_window_q = qg.shape[1]
+        qg = self.q_lin(qg).reshape(1, num_window_q, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                          3).contiguous()
+        kg = self.k_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                           3).contiguous()
+        vg = self.v_lin(part_f).reshape(1, num_parts, self.heads, C // self.heads).permute(0, 2, 1,
+                                                                                               3).contiguous()
+
+        attn = (qg @ kg.transpose(-2, -1))
+        attn = self.softmax(attn)
+        qg = (attn @ vg).transpose(1, 2).reshape(1, num_window_q, C)
+        qg = qg.transpose(1, 2).reshape(1, C, self.win_size[0], self.win_size[1], self.win_size[2])
+        q_s = q_s + qg
+        q_s = q_s + self.mlp(q_s)
+        q_s = F.interpolate(q_s, size=(X, Y, Z), mode='trilinear', align_corners=True)
+        out = shortcut + self.out_layer(q_s)
+        return out[0] # C, X, Y, Z
 
 class MSWA_3D(nn.Module): # Multi-Scale Window-Attention
     def __init__(self, dim, heads=4, window_size_q=[4, 4, 4],

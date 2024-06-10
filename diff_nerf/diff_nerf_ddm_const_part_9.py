@@ -1089,6 +1089,8 @@ class LatentDiffusion(DDPM):
     def render_img_sample_lopp(self, idx, render_kwargs, save_folder, export_img=True, export_mesh=False, **kwargs):
         device = self.device_buffer.device
         input = kwargs['input']
+        # texts = input['text']
+        dataset = kwargs['ds']
         H, W, focal = render_kwargs.hwf
         K = np.array([
             [focal, 0, 0.5 * W],
@@ -1116,7 +1118,12 @@ class LatentDiffusion(DDPM):
         for batch_id in range(total_batch):
             batch_idx = idx[batch_id * batch_size: (batch_id + 1) * batch_size]
             cur_batch_size = len(batch_idx)
+            cur_batch = [dataset[bid] for bid in batch_idx]
+            text = [cb['text'] for cb in cur_batch]
+            text = torch.stack(text, dim=0).to(device)
+            text_str = [cb['text_str'] for cb in cur_batch]
             part_fea = self.part_att(self.part_code.weight.unsqueeze(0).repeat(cur_batch_size, 1, 1))
+            # text = texts[batch_idx]
             # part_shape_fea = self.part_shape_mlp(self.shape_embs.weight[batch_idx])  # B, num_parts, part_fea_dim
             # part_texture_fea = self.part_texture_mlp(self.texture_embs.weight[batch_idx])  # B, num_parts, part_fea_dim
 
@@ -1132,13 +1139,14 @@ class LatentDiffusion(DDPM):
                                       0)
             render_poses = [render_pose for _ in range(cur_batch_size)]
             reconstructions = self.sample(batch_size=cur_batch_size, up_scale=1, cond=None, mask=None, device=device,
-                                          part_shape_fea=part_fea, part_texture_fea=None)
+                                          part_shape_fea=part_fea, part_texture_fea=None, text=text)
             # try:
             #     cls_logits = self.first_stage_model.classifier(reconstructions)
             #     cls_ids = torch.max(cls_logits, 1)[1]
             # except:
             #     cls_ids = None
             reconstructions = reconstructions * self.std_scale
+            text_emb = self.model.clip.encode_text(text)
             # reconstructions = input
             rgbss = []
             partss = []
@@ -1147,8 +1155,11 @@ class LatentDiffusion(DDPM):
             meshes = []
             part_mesh_lists = []
             for idx_obj in range(reconstructions.shape[0]):
+                with open(os.path.join(save_folder, 'text.txt'), 'a') as f:
+                    f.write(text_str[idx_obj])
+                    f.write('\n')
                 if export_mesh:
-                    mesh, part_mesh_list = self.nerf.export_mesh(reconstructions[idx_obj], part_fea[idx_obj])
+                    mesh, part_mesh_list = self.nerf.export_mesh(reconstructions[idx_obj], (part_fea[idx_obj], text_emb[idx_obj]))
                     export_meshes_to_path(save_folder / 'mesh' / f'{n + idx_obj}', mesh, part_mesh_list)
                     # meshes.append(mesh)
                     # part_mesh_lists.append(part_mesh_list)
@@ -1178,7 +1189,7 @@ class LatentDiffusion(DDPM):
                         viewdirs = viewdirs.flatten(0, -2).to(device)
                         render_result_chunks = [
                             {k: v for k, v in
-                             self.nerf.render_train(dens, fea, ro, rd, vd, batch_idx[idx_obj], part_fea[idx_obj],
+                             self.nerf.render_train(dens, fea, ro, rd, vd, batch_idx[idx_obj], part_fea[idx_obj], text_emb[idx_obj],
                                                     **render_kwargs).items() if k in keys}
                             for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
                         ]
