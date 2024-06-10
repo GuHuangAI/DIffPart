@@ -90,7 +90,7 @@ class NeRF(nn.Module):
         #                             part_dim=512,
         #                             hidden_dim=64,
         #                             win_size=[8, 8, 8])
-        self.text_mlp = nn.Linear(512, 16)
+        self.text_mlp = nn.Sequential(nn.Linear(512, 16), nn.LayerNorm(16))
         nn.init.constant_(self.text_mlp.bias, 0)
         self.index_conv = IndexConvMSWA(in_dim=5+1,
                                     part_dim=self.part_fea_dim,
@@ -632,7 +632,7 @@ class NeRF(nn.Module):
                 viewdirs_emb = viewdirs_emb.flatten(0, -2)[ray_id]
                 # k0_view = torch.cat([k0_view, viewdirs_emb], -1)
                 text_fea = self.text_mlp(text_fea)
-                k0_view = torch.cat([text_fea, k0, viewdirs_emb], -1)
+                k0_view = torch.cat([text_fea[None, ::].expand(batch, -1), k0, viewdirs_emb], -1)
                 # texture_code = self.texture_embs.weight[idx]
                 # texture_code = self.texture_dec(texture_code)
                 # rgb_feat = [self.feat_mlp(in1, in2) for in1, in2 in zip(k0_view.unsqueeze(1).split(8192, 0), \
