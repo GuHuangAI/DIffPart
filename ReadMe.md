@@ -1,4 +1,4 @@
-# Decoupled Diffusion Models with Explicit Transition Probability
+# Part-aware Shape Generation with Latent 3D Diffusion of Neural Voxel Fields 
 
 ## I. Before Starting.
 1. install torch
